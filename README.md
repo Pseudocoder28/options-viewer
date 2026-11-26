@@ -272,7 +272,7 @@ and the app cannot place orders.
 
 ## 📄 License
 
-Released under the [MIT License](LICENSE). © 2026 Pseudocoder28.
+Released under the [MIT License](LICENSE). © 2026 Naman Shah.
 
 <div align="center">
 <sub>Built by <a href="https://github.com/Pseudocoder28">@Pseudocoder28</a></sub>
