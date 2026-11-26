@@ -44,6 +44,18 @@ const merge = (a, b) => { const out = { ...a }; for (const [k, v] of Object.entr
 const AXIS = { gridcolor: C.grid, linecolor: C.axis, zerolinecolor: C.axis, tickcolor: C.axis, tickfont: { size: 10.5, color: C.muted },
                title: { font: { size: 11, color: C.muted }, standoff: 8 }, automargin: true };
 
+/** The text-size multiplier chosen with the A A A control (the --text custom property). */
+export const textScale = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--text')) || 1;
+/** Multiply every font size inside a Plotly layout (tick labels, titles, annotations, legend, hover). */
+function scaleFonts(node, k) {
+  if (Array.isArray(node)) return node.forEach(n => scaleFonts(n, k));
+  if (!isObj(node)) return;
+  for (const [key, v] of Object.entries(node)) {
+    if (/font$/i.test(key) && isObj(v) && typeof v.size === 'number') v.size *= k;
+    else scaleFonts(v, k);
+  }
+}
+
 /** Draw (or redraw) a chart with the terminal theme. Returns the element. */
 export function plot(el, traces, layout = {}, config = {}) {
   if (!window.Plotly) {
@@ -61,7 +73,13 @@ export function plot(el, traces, layout = {}, config = {}) {
   // gets its own copy of the defaults.
   if (!full.scene) { full.xaxis ??= {}; full.yaxis ??= {}; }
   for (const key of Object.keys(full)) if (/^[xy]axis\d*$/.test(key)) full[key] = merge(structuredClone(AXIS), full[key]);
-  window.Plotly.react(el, traces, full, { displayModeBar: false, responsive: true, ...config });
+  const k = textScale();
+  if (k !== 1) {
+    full = structuredClone(full);                 // callers may reuse their layout objects: scale a copy
+    scaleFonts(full, k);
+    traces = traces.map(t => (t.textfont?.size ? { ...t, textfont: { ...t.textfont, size: t.textfont.size * k } } : t));
+  }
+  window.Plotly.react(el, traces, full, { displayModeBar: false, showTips: false, responsive: true, ...config });
   plots.add(el);
   return el;
 }
@@ -146,12 +164,12 @@ export const modalOpen = () => !!modalEl;
 
 // ---------------------------------------------------------------- controls
 
-/** Segmented buttons. options: ['a', 'b'] or [['value', 'Label', 'tip text'], ...]. */
-export function seg(options, value, onPick, label) {
-  const box = h('div', { class: 'seg', role: 'group', 'aria-label': label });
+/** Segmented buttons. options: ['a', 'b'] or [['value', 'Label', 'tip text'], ...]. name labels it for screen readers when there is no visible label. */
+export function seg(options, value, onPick, label, name = label) {
+  const box = h('div', { class: 'seg', role: 'group', 'aria-label': name });
   for (const opt of options) {
     const [val, text, tiptext] = Array.isArray(opt) ? opt : [opt, opt];
-    box.append(h('button', { class: val === value ? 'on' : '', tiptext, key: `${label ?? 'seg'}:${text ?? val}`, onclick: () => onPick(val) }, text ?? val));
+    box.append(h('button', { class: val === value ? 'on' : '', tiptext, key: `${name ?? 'seg'}:${val}`, onclick: () => onPick(val) }, text ?? val));
   }
   return label ? h('label', { class: 'field' }, h('span', null, label), box) : box;
 }
@@ -218,6 +236,17 @@ export function keepFocus(fn) {
   const key = document.activeElement?.dataset?.key;
   fn();
   if (key && document.activeElement?.dataset?.key !== key) document.querySelector(`[data-key="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
+}
+
+// ---------------------------------------------------------------- change flashes
+
+const lastSeen = new Map();
+/** Flash el green or red when the number shown under this name has changed since it was last drawn. */
+export function flash(el, name, value) {
+  const before = lastSeen.get(name);
+  lastSeen.set(name, value);
+  if (before != null && value != null && value !== before) el.classList.add(value > before ? 'flash-up' : 'flash-down');
+  return el;
 }
 
 const KEY = 'optionsTerminal.';

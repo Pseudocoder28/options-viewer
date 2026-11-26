@@ -3,7 +3,7 @@
 import * as M from './model.js';
 import * as Q from './quant.js';
 import * as F from './fmt.js';
-import { h, mount, append, initTips, openModal, closeModal, modalOpen, purgePlots, store as disk, btn, tone, check, empty, skeleton, keepFocus } from './ui.js';
+import { h, mount, append, initTips, openModal, closeModal, modalOpen, purgePlots, store as disk, btn, seg, tone, check, empty, skeleton, keepFocus, flash } from './ui.js';
 import { TERMS } from './glossary.js';
 import { anchorExpiry } from './explain.js';
 import * as market from './views-market.js';
@@ -33,7 +33,8 @@ const KEEP_TICKERS = 6;      // how many recent tickers stay in memory, ready to
 const $ = id => document.getElementById(id);
 
 export const app = {
-  symbol: null, quote: null, chain: null, chainError: null, hv: null, hist: {}, loadedAt: 0, error: null,
+  symbol: null, quote: null, chain: null, chainError: null, hv: null, hist: {}, loadedAt: 0,
+  error: null, failed: null,   // the message of a load that failed, and the ticker it was for (RETRY loads it again)
   loading: false,        // a request is in flight (drives the progress bar)
   pending: null,         // ticker that was asked for but has no data yet (drives the placeholders)
   chainLoading: false,   // the price is in, the option chain is still on its way
@@ -42,6 +43,7 @@ export const app = {
   ui: disk.get('ui', {}), watch: disk.get('watch', DEFAULT_WATCH), watchQuotes: {},
   legs: disk.get('legs', {}), saved: disk.get('saved', []), lesson: disk.get('lesson', 'basics'), done: disk.get('done', {}),
   autoRefresh: disk.get('auto', true), message: null,
+  text: disk.get('text', 1),   // text size multiplier (the A A A control)
 };
 const recent = new Map();     // ticker -> { quote, chain, chainError, hv, loadedAt, expiry }
 let loadToken = 0, rerenderTimer = 0;
@@ -92,7 +94,8 @@ const ctx = {
   year: () => app.hist[`${app.symbol}|1Y`]?.data || null,
   /** What a view that needs the chain shows without one: a placeholder while it loads, the reason when there is none. */
   noChain: () => (app.chainLoading ? skeleton('Loading the option chain…', 8)
-    : empty(app.chainError || `No options are listed for ${app.symbol} on the free data sources (crypto, futures, funds and many foreign shares have none there). The price views still work.`)),
+    : app.chainError ? empty(app.chainError, '  ', btn('RETRY', () => load(app.symbol), '', 'Ask for the option chain again'))
+    : empty(`No options are listed for ${app.symbol} on the free data sources (crypto, futures, funds and many foreign shares have none there). The price views still work.`)),
 };
 
 // ---------------------------------------------------------------- loading
@@ -135,6 +138,7 @@ async function load(symbol, { quiet = false } = {}) {
     if (leaving) leaving.expiry = app.expiry;
     const snap = recent.get(symbol);
     if (snap) {
+      app.message = null;       // "GEMI loaded" must not linger under another ticker
       show(symbol, snap); applyWants(); disk.set('last', symbol); syncUrl(); render();
       if (Date.now() - snap.loadedAt < FRESH_MS) { app.loading = false; return renderChrome(); }
       quiet = true;
@@ -167,7 +171,7 @@ async function load(symbol, { quiet = false } = {}) {
     if (!quiet) ctx.status(`${symbol} loaded`);
   } catch (e) {
     if (token !== loadToken) return;
-    if (!quiet || !app.quote) app.error = e.message;
+    if (!quiet || !app.quote) Object.assign(app, { error: e.message, failed: symbol });
     ctx.status(e.message, true);
   } finally {
     if (token === loadToken) { Object.assign(app, { loading: false, pending: null, chainLoading: false }); syncUrl(); render(); }
@@ -237,7 +241,12 @@ function applyUrl() {
 // ---------------------------------------------------------------- chrome
 
 function renderTabs() {
-  mount($('tabs'), VIEWS.map((v, i) => h('button', { class: v.id === app.view ? 'on' : '', key: 'tab:' + v.id, onclick: () => ctx.go(v.id) }, h('span', { class: 'key' }, i + 1), v.label)));
+  const q = app.pending ? null : app.quote;
+  mount($('tabs'),
+    VIEWS.map((v, i) => h('button', { class: v.id === app.view ? 'on' : '', key: 'tab:' + v.id, onclick: () => ctx.go(v.id) }, h('span', { class: 'key' }, i + 1), v.label)),
+    // The ticker and its price, shown by the stylesheet once the quote bar has scrolled out of sight.
+    q ? h('button', { id: 'mini', key: 'mini', tiptext: 'Back to the top', onclick: () => scrollTo(0, 0) },
+      h('b', null, q.symbol), h('span', null, F.price(q.price)), h('span', { class: tone(q.changePct) }, F.signedPct(q.changePct / 100))) : null);
 }
 
 function renderQuote() {
@@ -251,7 +260,7 @@ function renderQuote() {
   mount(el,
     h('span', { class: 'sym' }, q.symbol),
     h('span', { class: 'name' }, q.name, h('span', { class: 'muted' }, `  ${q.exchange} · ${q.type}`)),
-    h('span', { class: 'px' }, F.price(q.price)),
+    flash(h('span', { class: 'px' }, F.price(q.price)), 'quote:' + q.symbol, q.price),
     h('span', { class: tone(q.change) }, `${F.signed(q.change, q.price < 10 ? 3 : 2)} (${F.signedPct(q.changePct / 100)})`),
     q.extPrice && state[1] === 'warn' ? h('span', { class: 'muted' }, `${state[0].toLowerCase()} ${F.price(q.extPrice)} `, h('span', { class: tone(q.extChangePct) }, F.signedPct(q.extChangePct / 100))) : null,
     state[0] ? h('span', { class: 'badge ' + state[1] }, state[0]) : null,
@@ -274,7 +283,7 @@ function renderWatch() {
   mount($('watch'), h('span', { class: 'label' }, 'WATCH'), app.watch.map(sym => {
     const q = app.watchQuotes[sym];
     return h('button', { class: 'w' + (sym === current ? ' on' : ''), key: 'watch:' + sym, onclick: () => ctx.load(sym) },
-      h('b', null, sym.replace('^', '')), h('span', null, q?.price != null ? F.price(q.price) : '…'),
+      h('b', null, sym.replace('^', '')), flash(h('span', null, q?.price != null ? F.price(q.price) : '…'), 'watch:' + sym, q?.price),
       q?.changePct != null ? h('span', { class: tone(q.changePct) }, F.signedPct(q.changePct / 100, 1)) : null,
       h('span', { class: 'x', tiptext: 'Remove', onclick: ev => { ev.stopPropagation(); app.watch = app.watch.filter(s => s !== sym); disk.set('watch', app.watch); renderWatch(); renderQuote(); } }, '✕'));
   }));
@@ -292,12 +301,19 @@ function renderStatus() {
     fresh ? h('span', { class: m.isError ? 'err' : 'msg' }, m.text) : null,
     h('span', { class: 'sp' }),
     check('auto-refresh 60s', app.autoRefresh, v => { app.autoRefresh = v; disk.set('auto', v); }),
-    h('span', null, h('kbd', null, '/'), ' command  ', h('kbd', null, '1'), '–', h('kbd', null, '8'), ' views  ', h('kbd', null, '['), h('kbd', null, ']'), ' expiry  ', h('kbd', null, '?'), ' help'));
+    h('span', { class: 'keys' }, h('kbd', null, '/'), ' command  ', h('kbd', null, '1'), '–', h('kbd', null, '8'), ' views  ', h('kbd', null, '['), h('kbd', null, ']'), ' expiry  ', h('kbd', null, '?'), ' help'));
 }
 
+const applyText = () => document.documentElement.style.setProperty('--text', app.text);
 function renderTop() {
+  const sizes = seg([[1, 'A', 'Normal text'], [1.12, 'A', 'Larger text'], [1.25, 'A', 'Largest text']], app.text, size => {
+    app.text = size; disk.set('text', size); applyText();
+    keepFocus(() => { renderTop(); render(); });        // charts take their text size when drawn, so draw them again
+  }, null, 'Text size');
+  sizes.classList.add('textsize');
   mount($('topbtns'),
     h('span', { class: 'clock', id: 'clock' }),
+    sizes,
     btn('GLOSSARY', showGlossary, '', 'Every term in plain English'),
     btn('HELP', showHelp, '', 'Commands and shortcuts'));
   tick();
@@ -307,14 +323,16 @@ function tick() {
   if (el) el.textContent = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: '2-digit', second: '2-digit' }) + ' NY';
 }
 
+const errorBanner = () => h('div', { class: 'banner err' }, app.error, '  ', btn('RETRY', () => load(app.failed || app.symbol), '', 'Try loading it again'));
+
 function renderView() {
-  const root = $('view'), keep = document.querySelector('.chain-wrap')?.scrollTop;
+  const root = $('view'), old = document.querySelector('.chain-wrap'), keep = old && [old.scrollTop, old.scrollLeft];
   keepFocus(() => {
     mount(root);
     if (app.pending) append(root, skeleton(`Loading ${app.pending}…`, 7, 's7'), skeleton('Snapshot', 7, 's5'), skeleton('Price', 5, 's7'), skeleton('Expiries', 5, 's5'));
-    else if (!app.quote) append(root, app.error ? h('div', { class: 'banner err' }, app.error) : null, empty('Type a ticker in the command line above, for example SPY or AAPL.'));
+    else if (!app.quote) append(root, app.error ? errorBanner() : null, empty('Type a ticker in the command line above, for example SPY or AAPL.'));
     else {
-      if (app.error) append(root, h('div', { class: 'banner err' }, app.error));
+      if (app.error) append(root, errorBanner());
       try { VIEWS.find(v => v.id === app.view).render(root, ctx); } catch (e) {
         console.error(e);
         append(root, h('div', { class: 'banner err' }, `This view hit an error: ${e.message}. The other views still work.`));
@@ -323,13 +341,38 @@ function renderView() {
   });
   purgePlots();
   const wrap = document.querySelector('.chain-wrap');
-  if (wrap && keep) wrap.scrollTop = keep;
+  if (wrap && keep) [wrap.scrollTop, wrap.scrollLeft] = keep;
 }
 function renderChrome() { $('top').classList.toggle('busy', app.loading); renderTabs(); renderQuote(); renderWatch(); renderStatus(); }
 function render() {
   document.title = app.pending ? `Loading ${app.pending.replace('^', '')}… · Options Terminal`
     : app.symbol ? `${app.symbol.replace('^', '')} ${F.price(app.quote?.price)} · Options Terminal` : 'Options Terminal';
   keepFocus(() => { renderChrome(); renderView(); });
+}
+
+/**
+ * The command bar tucks away while you scroll down and comes back as soon as you scroll up, so the
+ * views get the room. The tab bar always stays, and carries the ticker once the quote bar is out of sight.
+ * The stylesheet does the moving; this keeps its two numbers (--top-h, --tabs-h) true.
+ */
+function initChrome() {
+  const top = $('top'), tabs = $('tabs'), body = document.body, root = document.documentElement;
+  let anchor = scrollY;
+  const measure = () => {
+    root.style.setProperty('--top-h', (body.classList.contains('tucked') ? 0 : top.offsetHeight) + 'px');
+    root.style.setProperty('--tabs-h', tabs.offsetHeight + 'px');
+  };
+  const tuck = on => { if (body.classList.contains('tucked') !== on) { body.classList.toggle('tucked', on); measure(); } };
+  const update = () => {                      // browsers send at most one scroll event per frame, so this needs no throttle
+    const y = scrollY;
+    if (y < 60 || document.activeElement === $('cmd')) { tuck(false); anchor = y; }
+    else if (Math.abs(y - anchor) > 8) { tuck(y > anchor); anchor = y; }        // 8px of travel, so a nudge does not flip it
+    body.classList.toggle('scrolled', $('quote').getBoundingClientRect().bottom < tabs.getBoundingClientRect().bottom);
+  };
+  addEventListener('scroll', update, { passive: true });
+  $('cmd').addEventListener('focus', () => tuck(false));
+  const watcher = new ResizeObserver(measure);
+  watcher.observe(top); watcher.observe(tabs);
 }
 
 // ---------------------------------------------------------------- command line
@@ -392,7 +435,7 @@ function initKeys() {
     if (ev.metaKey || ev.ctrlKey || ev.altKey || modalOpen() || /^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName)) return;
     const n = Number(ev.key);
     if (ev.key !== ' ' && n >= 1 && n <= VIEWS.length) ctx.go(VIEWS[n - 1].id);
-    else if (ev.key === '/') { ev.preventDefault(); $('cmd').focus(); }
+    else if (ev.key === '/') { ev.preventDefault(); $('cmd').focus({ preventScroll: true }); }
     else if (ev.key === '?') showHelp();
     else if (ev.key === 'g') showGlossary();
     else if (ev.key === 'r' && app.symbol) load(app.symbol);
@@ -414,13 +457,14 @@ function showHelp() {
     h('dl', { class: 'help' },
       row('AAPL ⏎', 'Type any ticker or company name in the command line and press Enter. Stocks, ETFs and indexes all work: SPY, QQQ, ^SPX, ^VIX, ^NDX.'),
       row('SPY CHAIN ⏎', 'Add a view after the ticker to land on it: OVERVIEW (OV), PRICE (GP), CHAIN (OC), VOLATILITY (VOL), OI, STRATEGY (STRAT), CALCULATOR (CALC), LEARN.'),
-      row('/', 'Jump to the command line. With nothing typed it lists recent tickers, which open instantly.'),
+      row('/', 'Jump to the command line. With nothing typed it lists recent tickers, which open instantly. The command bar hides as you scroll down a page and returns when you scroll up or press this key.'),
       row('1 … 8', 'Switch view. The browser\'s Back button steps back through the views and tickers you visited.'),
       row('[  ]', 'Previous and next expiry.'),
       row('← ↑ ↓ →', 'On the CHAIN view: move between contracts (left for calls, right for puts). Enter opens the one under the cursor. Home and End jump to the lowest and highest strike.'),
       row('r', 'Reload the current ticker.'),
       row('g  ?', 'Glossary and this help.'),
-      row('Esc', 'Close a dialog or deselect a contract.')),
+      row('Esc', 'Close a dialog or deselect a contract.'),
+      row('A A A', 'Text size, top right: normal, larger, largest. Charts follow it.')),
     h('p', { class: 'note' }, 'The address bar always describes the screen you are on, including the expiry, the selected contract and the legs of a strategy. Bookmark it or copy it to come straight back.'),
     h('p', { class: 'note' }, 'Hover any dotted-underlined word or column heading for a plain-English definition. Panels with a ? LEARN button open the lesson behind them.'),
     h('p', { class: 'note' }, 'Data: option chains from Nasdaq\'s public feed for stocks and ETFs, Yahoo Finance for indexes; prices, history and search from Yahoo Finance. Everything is delayed about 15 minutes and comes without any guarantee. Volatility and Greeks are computed here from bid and ask prices.'),
@@ -441,7 +485,7 @@ function showGlossary() {
 // ---------------------------------------------------------------- start
 
 function start() {
-  initTips(); initCommand(); initKeys(); renderTop();
+  applyText(); initTips(); initCommand(); initKeys(); initChrome(); renderTop();
   $('brand').addEventListener('click', () => ctx.go('overview'));
   addEventListener('popstate', applyUrl);
   addEventListener('hashchange', applyUrl);

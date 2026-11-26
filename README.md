@@ -27,9 +27,17 @@ Type a ticker or company name in the command line at the top (`AAPL`, `SPY`, `^S
 Add a view to land on it (`SPY CHAIN`). Keys `1` to `8` switch views and `?` lists the shortcuts.
 
 On the Chain view the arrow keys move between contracts and Enter opens the one under the cursor.
+Its details open beside the chain, so the table stays in view. Expiry dates are grouped by month;
+a long list (an index has fifty or more) shows one month at a time.
+
 The browser's Back button steps back through the views and tickers you visited. The address bar
 always describes the screen, including the expiry, the selected contract and the legs of a
 strategy, so any screen can be bookmarked. Recently viewed tickers reopen instantly.
+
+The command bar hides while you scroll down and returns when you scroll up or press `/`. The
+`A A A` buttons at the top right set the text size. On the Price view, drag across the chart to
+zoom into a stretch of dates and double-click to zoom back out. A price that changed since the
+last refresh flashes green or red. Errors come with a RETRY button.
 
 | Key | View | What it shows |
 |---|---|---|
@@ -59,6 +67,7 @@ another source, write a `chain_<name>()` in `server.py` and put it first in `get
 - `static/js/quant.js`: pricing maths
 - `static/js/model.js`: chain analysis and strategy maths
 - `static/js/views-*.js`: the views
+- `static/js/expiries.js`: the expiry picker shared by the views
 - `static/js/learn.js`, `learn-widgets.js`: the course
 - `tests.mjs`: run `node tests.mjs` for the maths checks; with the server running it also
   checks live chains

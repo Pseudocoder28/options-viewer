@@ -2,6 +2,7 @@
 import * as M from './model.js';
 import * as F from './fmt.js';
 import { h, append, mount, plot, chart, panel, table, empty, note, seg, check, C, vline, hline, scene3d, whenVisible } from './ui.js';
+import { expiryPicker } from './expiries.js';
 
 const noChain = (root, ctx) => append(root, ctx.noChain());
 const expLabel = e => F.date(e.date) + (e.days > 300 ? ` '${e.date.slice(2, 4)}` : '') + (e.label !== e.date ? ` ${e.root}` : '');
@@ -33,9 +34,8 @@ export function vol(root, ctx) {
   append(root,
     h('div', { class: 'toolbar' },
       seg([['strike', 'Strike'], ['money', '% of price']], p.x, x => set({ x }), 'Across'),
-      check('Bid–ask range', p.band, band => set({ band }), 'Bars from the volatility implied by the bid up to the one implied by the ask. Long bars mean the market is not pinning the number down.'),
-      h('span', { class: 'field' }, h('span', null, 'Expiries (up to 5)'), h('div', { class: 'chips' }, withSmile.map(e =>
-        h('button', { class: 'chip' + (picks.includes(e.label) ? ' on' : ''), key: 'pick:' + e.label, onclick: () => toggle(e.label) }, expLabel(e), h('small', null, F.days(e.days))))))),
+      check('Bid–ask range', p.band, band => set({ band }), 'Bars from the volatility implied by the bid up to the one implied by the ask. Long bars mean the market is not pinning the number down.')),
+    expiryPicker(withSmile, { on: e => picks.includes(e.label), onPick: e => toggle(e.label), label: 'Compare up to 5', compact: false }),
     panel('Volatility by strike: the skew', { cls: 's8', code: 'SKEW', lesson: ['iv', () => ctx.openLesson('iv')] }, skew),
     panel('Reading the skew', { cls: 's4' }, h('div', { class: 'prose' },
       h('p', null, 'Each line is one expiry. Each point is the implied volatility of the option at that strike, taken from out-of-the-money contracts: puts below the price, calls above it.'),
@@ -139,11 +139,10 @@ export function oi(root, ctx) {
   const oiChart = chart(), volChart = chart(), painChart = chart(), gexChart = chart(), timeChart = chart('short');
 
   append(root,
+    expiryPicker(chain.expiries, { on: e => e === exp, onPick: e => ctx.setExpiry(e.label) }),
     h('div', { class: 'toolbar' },
       seg([['expiry', expLabel(exp)], ['near', 'Next 45 days'], ['all', 'All expiries']], p.scope, s => set({ scope: s }), 'Scope'),
-      seg([[8, '±8'], [15, '±15'], [30, '±30'], [0, 'All']], p.window, window => set({ window }), 'Strikes'),
-      p.scope === 'expiry' ? h('span', { class: 'field' }, h('span', null, 'Expiry'), h('div', { class: 'chips' }, chain.expiries.slice(0, 14).map(e =>
-        h('button', { class: 'chip' + (e === exp ? ' on' : ''), key: 'exp:' + e.label, onclick: () => ctx.setExpiry(e.label) }, expLabel(e))))) : null),
+      seg([[8, '±8'], [15, '±15'], [30, '±30'], [0, 'All']], p.window, window => set({ window }), 'Strikes')),
     panel(`Open interest by strike · ${scopeName}`, { cls: 's6', code: 'OI', lesson: ['chain', () => ctx.openLesson('chain')] }, oiChart,
       note('Contracts that exist right now. Calls rise above the line, puts hang below it. Tall bars mark prices where many traders have something at stake.')),
     panel(`Volume today by strike · ${scopeName}`, { cls: 's6', code: 'VOL' }, volChart,

@@ -2,7 +2,7 @@
 import * as M from './model.js';
 import * as Q from './quant.js';
 import * as F from './fmt.js';
-import { h, append, mount, plot, chart, panel, stat, table, empty, note, story, seg, check, tone, C, hline, vline, skeletonLines } from './ui.js';
+import { h, append, mount, plot, chart, panel, stat, table, empty, note, story, seg, check, tone, btn, C, hline, vline, skeletonLines } from './ui.js';
 import { chainStory } from './explain.js';
 
 
@@ -91,6 +91,7 @@ export function price(root, ctx) {
   const set = patch => { Object.assign(p, patch); ctx.savePrefs(); ctx.rerenderView(); };
   const main = chart('xl'), volChart = chart('short'), statsBox = h('div', { class: 'stats' });
   const tick = (key, label, tiptext) => check(label, p[key], v => set({ [key]: v }), tiptext);
+  const reset = h('button', { class: 'btn ghost', hidden: true, key: 'reset-zoom', onclick: () => window.Plotly.relayout(main, { 'xaxis.autorange': true }) }, 'RESET ZOOM');
   append(root,
     h('div', { class: 'toolbar' },
       seg(RANGES, p.range, range => set({ range }), 'Range'),
@@ -98,7 +99,7 @@ export function price(root, ctx) {
       tick('sma20', 'MA 20', 'Average close of the last 20 bars.'), tick('sma50', 'MA 50', 'Average close of the last 50 bars.'), tick('sma200', 'MA 200', 'Average close of the last 200 bars.'),
       app.chain ? tick('cone', 'Expected-move cone', 'The range option prices imply for each expiry date (one standard deviation). Daily charts only.') : null,
       app.chain ? tick('walls', 'OI walls', 'Strikes holding the most open contracts in the next 60 days.') : null),
-    panel(`${sym} price`, { cls: 'flush', code: 'GP' }, main),
+    panel(`${sym} price`, { cls: 'flush', code: 'GP', tools: [h('span', { class: 'code' }, 'DRAG ACROSS THE CHART TO ZOOM · DOUBLE-CLICK TO RESET'), reset] }, main),
     panel('Realized against implied volatility', { cls: 's7', lesson: ['iv', () => ctx.openLesson('iv')] }, volChart,
       note('The lines show how much the price has actually been moving (annualised). The amber line is what options are pricing for the next 30 days. Options above the lines are pricing in more movement than the recent past.')),
     panel('This range in numbers', { cls: 's5 flush' }, statsBox),
@@ -111,7 +112,7 @@ export function price(root, ctx) {
   ctx.history(p.range).then(hist => {
     if (!main.isConnected) return;
     mount(main);
-    drawPrice(main, hist, p, app);
+    drawPrice(main, hist, p, app, zoomed => { reset.hidden = !zoomed; });
     const s = M.historyStats(hist);
     if (s) mount(statsBox,
       stat('Change', F.signedPct(s.change), { tone: tone(s.change) }), stat('High', F.price(s.high)), stat('Low', F.price(s.low)),
@@ -119,7 +120,7 @@ export function price(root, ctx) {
       stat('Typical bar range', F.pct(s.avgRange), { tiptext: 'Average high-to-low distance of one bar, as a share of the price.' }),
       stat('Typical move', F.pct(s.avgAbsMove), { tiptext: 'Average size of the close-to-close change, ignoring direction.' }),
       stat('Best bar', F.signedPct(s.best), { tone: 'up', sub: F.date(s.bestAt) }), stat('Worst bar', F.signedPct(s.worst), { tone: 'down', sub: F.date(s.worstAt) }));
-  }).catch(e => { if (main.isConnected) mount(main, empty(e.message)); });
+  }).catch(e => { if (main.isConnected) mount(main, empty(e.message, '  ', btn('RETRY', ctx.rerenderView, '', 'Ask for the price history again'))); });
 
   const year = ctx.year();
   if (year && year.c.length > 25) {
@@ -133,7 +134,7 @@ export function price(root, ctx) {
   } else mount(volChart, app.chainLoading ? skeletonLines(5) : empty('Not enough daily history to measure realized volatility.'));
 }
 
-function drawPrice(el, hist, p, app) {
+function drawPrice(el, hist, p, app, onZoom) {
   const q = app.quote, chain = app.chain, intraday = /[mh]$/.test(hist.interval), daily = hist.interval === '1d';
   const x = hist.t.map(ts => (intraday ? F.nyStamp(ts) : F.nyStamp(ts).slice(0, 10)));
   const traces = [], shapes = [], notes = [];
@@ -186,9 +187,30 @@ function drawPrice(el, hist, p, app) {
   }
   plot(el, traces, {
     showlegend: traces.length > 2, hovermode: 'x unified', margin: { l: 10, r: 58, t: 26, b: 30 },
+    dragmode: 'zoom',        // drag across a stretch of dates to zoom into it; the price scale follows (below)
     xaxis: { rangeslider: { visible: false }, rangebreaks: breaks, showspikes: true, spikemode: 'across', spikethickness: 1, spikecolor: C.muted, spikedash: 'dot' },
-    yaxis: { side: 'right', domain: [0.2, 1], tickformat: spot < 10 ? ',.2f' : ',.0f' },
-    yaxis2: { domain: [0, 0.15], showticklabels: false, showgrid: false },
+    yaxis: { side: 'right', domain: [0.2, 1], tickformat: spot < 10 ? ',.2f' : ',.0f', fixedrange: true },
+    yaxis2: { domain: [0, 0.15], showticklabels: false, showgrid: false, fixedrange: true },
     shapes, annotations: notes,
+  });
+  // After a zoom, fit the price scale to what is in view. Our own relayout comes back through this
+  // event as well, which is why only changes to the date axis count.
+  el.on?.('plotly_relayout', change => {
+    if (!Object.keys(change).some(key => key.startsWith('xaxis.'))) return;
+    const zoomed = el.layout.xaxis.autorange === false;
+    onZoom?.(zoomed);
+    if (!zoomed) return window.Plotly.relayout(el, { 'yaxis.autorange': true });
+    const [from, to] = el.layout.xaxis.range.map(String);
+    let lo = Infinity, hi = -Infinity;
+    for (const t of el.data) {
+      if (t.yaxis === 'y2') continue;                                 // volume keeps its own scale
+      t.x.forEach((at, i) => {
+        if (at < from || at > to) return;                             // both are "YYYY-MM-DD HH:MM" text, which sorts by time
+        const low = (t.low || t.y)[i], high = (t.high || t.y)[i];
+        if (low != null && low < lo) lo = low;
+        if (high != null && high > hi) hi = high;
+      });
+    }
+    if (hi > lo) window.Plotly.relayout(el, { 'yaxis.range': [lo - (hi - lo) * 0.06, hi + (hi - lo) * 0.06] });
   });
 }

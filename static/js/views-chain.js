@@ -1,7 +1,8 @@
 // Option chain: expiry strip, the calls | strike | puts table, a heatmap, and the contract explainer.
 import * as M from './model.js';
 import * as F from './fmt.js';
-import { h, append, mount, plot, chart, panel, stat, note, story, seg, select, slider, btn, openModal, C } from './ui.js';
+import { h, append, mount, plot, chart, panel, stat, note, story, seg, select, slider, btn, flash, C } from './ui.js';
+import { expiryPicker } from './expiries.js';
 import { expiryStory, contractStory } from './explain.js';
 import { drawPayoff } from './payoff.js';
 
@@ -31,8 +32,8 @@ const PRESETS = {
 };
 const METRICS = { oi: ['Open interest', c => c.oi, F.compact], vol: ['Volume today', c => c.vol, F.compact], iv: ['Implied volatility', c => (c.sigma == null ? null : c.sigma * 100), v => F.num(v, 0) + '%'],
                   mark: ['Price (mid)', c => c.mark, F.price], spr: ['Spread % of price', c => (c.spreadPct == null ? null : c.spreadPct * 100), v => F.num(v, 0) + '%'] };
-const narrow = () => matchMedia('(max-width: 1150px)').matches;
 let cursor = null;      // id of the contract under the keyboard cursor
+let revealed = null;    // id of the chosen contract the table was last slid sideways to show
 
 export function render(root, ctx) {
   const { app } = ctx, chain = app.chain, q = app.quote;
@@ -42,18 +43,17 @@ export function render(root, ctx) {
   const exp = ctx.expiry() || chain.expiries[0], selected = ctx.contract();
 
   append(root,
-    h('div', { class: 'expiries', role: 'tablist', 'aria-label': 'Expiry dates' }, chain.expiries.map(e =>
-      h('button', { class: e === exp ? 'on' : '', key: 'exp:' + e.label, onclick: () => ctx.setExpiry(e.label), tiptext: `${F.weekday(e.date)} ${F.dateLong(e.date)} · ${e.strikes.length} strikes` },
-        h('span', null, F.date(e.date), e.days > 300 ? ` '${e.date.slice(2, 4)}` : '', e.label !== e.date ? ` ${e.root}` : ''),
-        h('small', null, `${F.days(e.days)} · ${{ weekly: 'W', monthly: 'M', quarterly: 'Q', leap: 'LEAP' }[e.kind]}${e.atmIV != null ? ' · ' + F.iv(e.atmIV) : ''}`)))),
+    expiryPicker(chain.expiries, { on: e => e === exp, onPick: e => ctx.setExpiry(e.label) }),
     h('div', { class: 'toolbar' },
       seg([['table', 'Table'], ['heat', 'Heatmap']], p.mode, mode => set({ mode }), 'View'),
       seg([[6, '±6'], [10, '±10'], [20, '±20'], [0, 'All']], p.window, window => set({ window }), 'Strikes'),
       p.mode === 'table' ? seg([['basic', 'Basic'], ['greeks', 'Greeks'], ['all', 'Everything']], p.cols, cols => set({ cols }), 'Columns') : null,
-      p.mode === 'table' ? seg([[1, 'Per share', 'Prices as quoted. One contract is 100 shares.'], [100, 'Per contract', 'Everything multiplied by 100: what one contract costs, and its Greeks in dollars and shares.']], p.unit, unit => set({ unit })) : null,
+      p.mode === 'table' ? seg([[1, 'Per share', 'Prices as quoted. One contract is 100 shares.'], [100, 'Per contract', 'Everything multiplied by 100: what one contract costs, and its Greeks in dollars and shares.']], p.unit, unit => set({ unit }), null, 'Units') : null,
       p.mode === 'heat' ? select(Object.entries(METRICS).map(([k, m]) => [k, m[0]]), p.metric, metric => set({ metric }), 'Colour by') : null));
 
-  const layout = h('div', { class: 'chain-layout' });
+  // The details of a chosen contract sit beside the table: in the side column on a wide window, as a
+  // drawer next to the chain on a narrower one (the stylesheet decides), so the chain stays in view.
+  const layout = h('div', { class: 'chain-layout' + (selected ? ' has-detail' : '') });
   append(root, layout);
   const side = h('div', { class: 'chain-side' });
   if (p.mode === 'heat') {
@@ -66,8 +66,22 @@ export function render(root, ctx) {
   } else {
     append(layout, h('div', { class: 'chain-main' }, tablePanel(exp, chain, q, p, selected, ctx)), side);
   }
-  if (selected && !narrow()) append(side, panel(contractStory(selected, chain, q).title, { code: selected.symbol, tools: btn('✕', () => ctx.select(null), 'ghost', 'Deselect (Esc)') }, contractDetail(selected, ctx)));
-  append(side, panel(`${F.date(exp.date)} in plain English`, { lesson: ['chain', () => ctx.openLesson('chain')] }, story(expiryStory(exp, chain, q))));
+  if (selected) append(side, panel(contractStory(selected, chain, q).title, { cls: 'chain-detail', code: selected.symbol,
+    tools: h('button', { class: 'btn ghost', key: 'close-detail', 'aria-label': 'Close the contract details', tiptext: 'Close (Esc)', onclick: () => ctx.select(null) }, '✕') }, contractDetail(selected, ctx)));
+  append(side, panel(`${F.date(exp.date)} in plain English`, { cls: 'chain-story', lesson: ['chain', () => ctx.openLesson('chain')] }, story(expiryStory(exp, chain, q))));
+
+  // Beside the details the table can be wider than its box: slide it once so the chosen contract shows.
+  if (!selected) revealed = null;
+  else if (revealed !== selected.id) {
+    revealed = selected.id;
+    requestAnimationFrame(() => {
+      const wrap = document.querySelector('.chain-wrap'), cells = wrap?.querySelectorAll('td.sel');
+      if (!cells?.length) return;
+      const box = wrap.getBoundingClientRect(), a = cells[0].getBoundingClientRect(), b = cells[cells.length - 1].getBoundingClientRect();
+      if (b.right > box.right) wrap.scrollLeft += b.right - box.right;
+      else if (a.left < box.left) wrap.scrollLeft -= box.left - a.left;
+    });
+  }
 
   // Centre the table on the money when the expiry or strike window changes.
   const key = `${app.symbol}|${exp.label}|${p.window}|${p.mode}`;
@@ -99,13 +113,9 @@ function tablePanel(exp, chain, q, p, selected, ctx) {
     const cls = [side, c.itm ? 'itm' : '', c === selected ? 'sel' : '', col.dim?.(c) ? 'dim' : '', col.est?.(c) ? 'est' : '', col.tone?.(c) || ''].join(' ');
     const td = h('td', { class: cls }, col.bar && c[col.bar] ? h('i', { class: 'bar', style: { width: Math.max(c[col.bar] / maxes[col.bar] * 100, 2) + '%' } }) : null, h('span', null, col.get(c, k)));
     td.dataset.id = c.id;
-    return td;
+    return key === 'bid' || key === 'ask' ? flash(td, `${c.symbol}|${key}`, c[key]) : td;
   };
-  const open = c => {
-    cursor = c.id;
-    ctx.select(c);
-    if (narrow()) openModal(contractStory(c, chain, q).title, contractDetail(c, ctx), { wide: true });
-  };
+  const open = c => { cursor = c.id; ctx.select(c === selected ? null : c); };       // a second click closes the details
   const body = h('tbody', { onclick: ev => {
     const id = ev.target.closest('td[data-id]')?.dataset.id, c = id && chain.contracts.find(x => x.id === id);
     if (c) open(c);
