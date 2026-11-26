@@ -14,6 +14,7 @@ No account. No API key. No build step.
 ![uv](https://img.shields.io/badge/run%20with-uv-DE5FE9)
 ![Tests](https://img.shields.io/badge/tests-24%20passing-2ea44f)
 ![Platform](https://img.shields.io/badge/macOS%20app-included-000000?logo=apple&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 [Quick start](#-quick-start) · [Features](#-features) · [Screenshots](#-tour) · [How it works](#-how-it-works) · [Tests](#-tests)
 
@@ -266,6 +267,12 @@ ok  ^VIX: chain builds and every number is sane (1097 contracts, 11 expiries, 6 
 
 This is a learning and analysis tool. The data is delayed and unofficial, **nothing here is investment advice**,
 and the app cannot place orders.
+
+---
+
+## 📄 License
+
+Released under the [MIT License](LICENSE). © 2026 Pseudocoder28.
 
 <div align="center">
 <sub>Built by <a href="https://github.com/Pseudocoder28">@Pseudocoder28</a></sub>
