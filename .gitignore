@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+# local secrets, such as a data-feed key
+.env
+.claude/settings.local.json

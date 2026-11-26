@@ -1,0 +1,215 @@
+// Option chain: expiry strip, the calls | strike | puts table, a heatmap, and the contract explainer.
+import * as M from './model.js';
+import * as F from './fmt.js';
+import { h, append, mount, plot, chart, panel, stat, empty, note, story, seg, select, slider, btn, openModal, C } from './ui.js';
+import { expiryStory, contractStory } from './explain.js';
+import { drawPayoff } from './payoff.js';
+
+const money = (v, k) => (v == null ? '—' : k === 1 ? F.price(v) : F.num(v * k, Math.abs(v * k) >= 1000 ? 0 : 2));
+const small = (v, k) => (v == null ? '—' : k === 1 ? F.greek(v, Math.abs(v) < 0.01 ? 4 : 3) : F.num(v * k, 2));
+// get(c, k): k is 1 (per share) or 100 (per contract).
+const COLS = {
+  bid: { label: 'Bid', tip: 'bid', get: (c, k) => (c.bid > 0 ? money(c.bid, k) : '—'), dim: c => !(c.bid > 0) },
+  ask: { label: 'Ask', tip: 'ask', get: (c, k) => (c.ask > 0 ? money(c.ask, k) : '—'), dim: c => !(c.ask > 0) },
+  last: { label: 'Last', tip: 'last', get: (c, k) => money(c.last, k), dim: () => true },
+  chg: { label: 'Chg', tiptext: 'Change in the last traded price since the previous close.', get: (c, k) => (c.chg ? (c.chg > 0 ? '+' : '') + money(c.chg, k) : '—'), tone: c => (c.chg > 0 ? 'up' : c.chg < 0 ? 'down' : 'dim') },
+  vol: { label: 'Vol', tip: 'volume', get: c => (c.vol ? F.int(c.vol) : '—'), bar: 'vol', dim: c => !c.vol },
+  oi: { label: 'OI', tip: 'oi', get: c => (c.oi ? F.int(c.oi) : '—'), bar: 'oi', dim: c => !c.oi },
+  iv: { label: 'IV', tip: 'iv', get: c => F.iv(c.sigma), est: c => c.sigmaSrc === 'model' },
+  delta: { label: 'Delta', tip: 'delta', get: (c, k) => (c.delta == null ? '—' : k === 1 ? F.num(c.delta, 2) : F.num(c.delta * 100, 0)) },
+  gamma: { label: 'Gamma', tip: 'gamma', get: (c, k) => small(c.gamma, k) },
+  theta: { label: 'Theta', tip: 'theta', get: (c, k) => small(c.theta, k) },
+  vega: { label: 'Vega', tip: 'vega', get: (c, k) => small(c.vega, k) },
+  prob: { label: 'ITM %', tip: 'probitm', get: c => F.pct(c.probITM, 0) },
+  ext: { label: 'Time val', tip: 'extrinsic', get: (c, k) => money(c.extrinsic, k) },
+  spr: { label: 'Sprd %', tip: 'spread', get: c => F.pct(c.spreadPct, 0), tone: c => (c.spreadPct > 0.15 ? 'down' : '') },
+};
+const PRESETS = {
+  basic: ['oi', 'vol', 'iv', 'delta', 'bid', 'ask'],
+  greeks: ['iv', 'delta', 'gamma', 'theta', 'vega', 'bid', 'ask'],
+  all: ['oi', 'vol', 'last', 'chg', 'spr', 'ext', 'prob', 'iv', 'delta', 'gamma', 'theta', 'vega', 'bid', 'ask'],
+};
+const METRICS = { oi: ['Open interest', c => c.oi, F.compact], vol: ['Volume today', c => c.vol, F.compact], iv: ['Implied volatility', c => (c.sigma == null ? null : c.sigma * 100), v => F.num(v, 0) + '%'],
+                  mark: ['Price (mid)', c => c.mark, F.price], spr: ['Spread % of price', c => (c.spreadPct == null ? null : c.spreadPct * 100), v => F.num(v, 0) + '%'] };
+const narrow = () => matchMedia('(max-width: 1150px)').matches;
+
+export function render(root, ctx) {
+  const { app } = ctx, chain = app.chain, q = app.quote, sym = q.symbol.replace('^', '');
+  if (!chain) return append(root, empty(app.chainError || `No options are listed for ${sym} on the free data sources. Try the PRICE view, or another ticker.`));
+  const p = ctx.prefs('chain', { window: 10, cols: 'basic', unit: 1, mode: 'table', metric: 'oi' });
+  const set = patch => { Object.assign(p, patch); ctx.savePrefs(); ctx.rerenderView(); };
+  const exp = ctx.expiry() || chain.expiries[0], selected = ctx.contract();
+
+  append(root,
+    h('div', { class: 'expiries', role: 'tablist', 'aria-label': 'Expiry dates' }, chain.expiries.map(e =>
+      h('button', { class: e === exp ? 'on' : '', onclick: () => ctx.setExpiry(e.label), tiptext: `${F.weekday(e.date)} ${F.dateLong(e.date)} · ${e.strikes.length} strikes` },
+        h('span', null, F.date(e.date), e.days > 300 ? ` '${e.date.slice(2, 4)}` : '', e.label !== e.date ? ` ${e.root}` : ''),
+        h('small', null, `${F.days(e.days)} · ${{ weekly: 'W', monthly: 'M', quarterly: 'Q', leap: 'LEAP' }[e.kind]}${e.atmIV != null ? ' · ' + F.iv(e.atmIV) : ''}`)))),
+    h('div', { class: 'toolbar' },
+      seg([['table', 'Table'], ['heat', 'Heatmap']], p.mode, mode => set({ mode }), 'View'),
+      seg([[6, '±6'], [10, '±10'], [20, '±20'], [0, 'All']], p.window, window => set({ window }), 'Strikes'),
+      p.mode === 'table' ? seg([['basic', 'Basic'], ['greeks', 'Greeks'], ['all', 'Everything']], p.cols, cols => set({ cols }), 'Columns') : null,
+      p.mode === 'table' ? seg([[1, 'Per share', 'Prices as quoted. One contract is 100 shares.'], [100, 'Per contract', 'Everything multiplied by 100: what one contract costs, and its Greeks in dollars and shares.']], p.unit, unit => set({ unit })) : null,
+      p.mode === 'heat' ? select(Object.entries(METRICS).map(([k, m]) => [k, m[0]]), p.metric, metric => set({ metric }), 'Colour by') : null));
+
+  const layout = h('div', { class: 'chain-layout' });
+  append(root, layout);
+  const side = h('div', { class: 'chain-side' });
+  if (p.mode === 'heat') {
+    const calls = chart('tall'), puts = chart('tall');
+    append(layout, h('div', { class: 'chain-main' },
+      panel(`Calls: ${METRICS[p.metric][0].toLowerCase()} by strike and expiry`, { cls: 'flush', code: 'HEAT' }, calls),
+      panel(`Puts: ${METRICS[p.metric][0].toLowerCase()} by strike and expiry`, { cls: 'flush' }, puts),
+      note('Brighter cells hold more. Hover a cell for the number, click it to open that contract in the table.')), side);
+    heatmap(calls, chain, false, p, ctx); heatmap(puts, chain, true, p, ctx);
+  } else {
+    append(layout, h('div', { class: 'chain-main' }, tablePanel(exp, chain, q, p, selected, ctx)), side);
+  }
+  if (selected && !narrow()) append(side, panel(contractStory(selected, chain, q).title, { code: selected.symbol, tools: btn('✕', () => ctx.select(null), 'ghost', 'Deselect (Esc)') }, contractDetail(selected, ctx)));
+  append(side, panel(`${F.date(exp.date)} in plain English`, { lesson: ['chain', () => ctx.openLesson('chain')] }, story(expiryStory(exp, chain, q))));
+
+  // Centre the table on the money when the expiry or strike window changes.
+  const key = `${app.symbol}|${exp.label}|${p.window}|${p.mode}`;
+  if (p._centred !== key) {
+    p._centred = key;
+    requestAnimationFrame(() => {
+      const wrap = document.querySelector('.chain-wrap'), spot = wrap?.querySelector('tr.spot');
+      if (spot) wrap.scrollTop = spot.offsetTop - wrap.clientHeight / 2;
+    });
+  }
+}
+
+function tablePanel(exp, chain, q, p, selected, ctx) {
+  const sym = q.symbol.replace('^', ''), k = p.unit;
+  const cols = PRESETS[p.cols], rest = cols.filter(c => c !== 'bid' && c !== 'ask');
+  const callCols = [...rest, 'bid', 'ask'], putCols = ['bid', 'ask', ...[...rest].reverse()];
+  let strikes = exp.strikes;
+  if (p.window) {
+    const at = strikes.indexOf(exp.atmStrike);
+    strikes = strikes.filter((s, i) => Math.abs(i - at) <= p.window || (selected && selected.exp === exp && selected.strike === s));
+  }
+  const rows = strikes.map(s => exp.rows.get(s));
+  const max = key => Math.max(1, ...rows.flatMap(r => [r.call?.[key] || 0, r.put?.[key] || 0]));
+  const maxes = { vol: max('vol'), oi: max('oi') };
+
+  const cell = (c, key, side) => {
+    const col = COLS[key];
+    if (!c) return h('td', { class: side + ' dim' }, '');
+    const cls = [side, c.itm ? 'itm' : '', c === selected ? 'sel' : '', col.dim?.(c) ? 'dim' : '', col.est?.(c) ? 'est' : '', col.tone?.(c) || ''].join(' ');
+    const td = h('td', { class: cls }, col.bar && c[col.bar] ? h('i', { class: 'bar', style: { width: Math.max(c[col.bar] / maxes[col.bar] * 100, 2) + '%' } }) : null, h('span', null, col.get(c, k)));
+    td.dataset.id = c.id;
+    return td;
+  };
+  const body = h('tbody', { onclick: ev => {
+    const id = ev.target.closest('td[data-id]')?.dataset.id, c = id && chain.contracts.find(x => x.id === id);
+    if (!c) return;
+    ctx.select(c);
+    if (narrow()) openModal(contractStory(c, chain, q).title, contractDetail(c, ctx), { wide: true });
+  } });
+  let marked = false;
+  const marker = () => h('tr', { class: 'spot' }, h('td', { colSpan: callCols.length + putCols.length + 1 },
+    `▲ lower strikes     ${sym} ${F.price(chain.spot)}${Math.abs(exp.basis - 1) > 0.005 ? `  ·  option quotes imply ${F.price(exp.S)}` : ''}     higher strikes ▼`));
+  for (const r of rows) {
+    if (!marked && r.strike > exp.S) { body.append(marker()); marked = true; }
+    body.append(h('tr', null, callCols.map(key => cell(r.call, key, 'c')), h('td', { class: 'k' }, F.strike(r.strike)), putCols.map(key => cell(r.put, key, 'p'))));
+  }
+  if (!marked) body.append(marker());
+  const head = key => h('th', { tip: COLS[key].tip, tiptext: COLS[key].tiptext }, COLS[key].label);
+  const hidden = exp.strikes.length - rows.length;
+  return panel(`${sym} ${F.dateLong(exp.date)} · ${F.days(exp.days)} to expiry`, { cls: 'flush', code: 'OC' },
+    h('div', { class: 'chain-wrap' }, h('table', { class: 'chain' },
+      h('thead', null,
+        h('tr', null, h('th', { class: 'side c', colSpan: callCols.length, tip: 'call' }, 'CALLS'), h('th', { class: 'side', tip: 'strike' }, 'STRIKE'), h('th', { class: 'side p', colSpan: putCols.length, tip: 'put' }, 'PUTS')),
+        h('tr', null, callCols.map(head), h('th', null, ''), putCols.map(head))),
+      body)),
+    h('div', { class: 'legend' },
+      h('span', null, h('i', { style: { background: 'var(--call-bg)', border: '1px solid var(--call)' } }), h('i', { style: { background: 'var(--put-bg)', border: '1px solid var(--put)' } }), 'shaded = in the money'),
+      h('span', null, h('i', { style: { borderTop: '2px solid var(--amber)', height: '2px' } }), 'where the price is'),
+      h('span', null, h('em', null, 'italic IV'), ' = estimated from neighbouring strikes'),
+      h('span', null, 'bars = volume and open interest'),
+      h('span', null, k === 100 ? 'figures are per contract (×100)' : 'prices are per share: ×100 for one contract'),
+      hidden > 0 ? h('span', { class: 'amber' }, `${hidden} more strikes hidden: choose All`) : null));
+}
+
+function heatmap(el, chain, put, p, ctx) {
+  const [label, value, fmt] = METRICS[p.metric];
+  const all = [...new Set(chain.expiries.flatMap(e => e.strikes))].sort((a, b) => a - b);
+  let strikes = all;
+  if (p.window) {
+    const at = all.reduce((best, s, i) => (Math.abs(s - chain.spot) < Math.abs(all[best] - chain.spot) ? i : best), 0);
+    strikes = all.filter((s, i) => Math.abs(i - at) <= p.window * 2);
+  }
+  const exps = chain.expiries.slice(0, 24);
+  const pick = (e, s) => e.rows.get(s)?.[put ? 'put' : 'call'];
+  const z = strikes.map(s => exps.map(e => { const c = pick(e, s), v = c ? value(c) : null; return v > 0 ? v : null; }));
+  const text = z.map(row => row.map(v => (v == null ? '' : fmt(v))));
+  const log = p.metric === 'oi' || p.metric === 'vol';
+  const x = exps.map(e => F.date(e.date) + (e.days > 300 ? ` '${e.date.slice(2, 4)}` : '') + (e.label !== e.date ? ` ${e.root}` : ''));
+  plot(el, [{ type: 'heatmap', x, y: strikes.map(s => F.strike(s)), z: log ? z.map(r => r.map(v => (v == null ? null : Math.log10(1 + v)))) : z, text, customdata: text,
+    texttemplate: strikes.length <= 26 && exps.length <= 14 ? '%{text}' : '', textfont: { size: 10 }, xgap: 2, ygap: 2, colorscale: C.seq, hoverongaps: false,
+    colorbar: { thickness: 10, outlinewidth: 0, tickfont: { size: 10, color: C.muted }, ...(log ? { tickvals: [0, 1, 2, 3, 4, 5], ticktext: ['0', '10', '100', '1k', '10k', '100k'] } : {}) },
+    hovertemplate: `<b>%{y} ${put ? 'put' : 'call'}, %{x}</b><br>${label}: %{customdata}<extra></extra>` }],
+    { margin: { l: 56, r: 10, t: 34, b: 10 }, xaxis: { type: 'category', side: 'top', showgrid: false }, yaxis: { type: 'category', showgrid: false, title: { text: 'Strike' } } });
+  el.on?.('plotly_click', ev => {
+    const pt = ev.points[0], c = pick(exps[pt.pointIndex[1]], strikes[pt.pointIndex[0]]);
+    if (c) { p.mode = 'table'; ctx.savePrefs(); ctx.select(c); }
+  });
+}
+
+/** Everything about one contract: quote, plain-English reading, Greeks in dollars, payoff and what-if. */
+function contractDetail(c, ctx) {
+  const { app } = ctx, chain = app.chain, q = app.quote, e = c.exp;
+  const s = contractStory(c, chain, q), color = c.put ? 'var(--put)' : 'var(--call)';
+  const buyAt = c.ask > 0 ? c.ask : c.mark ?? c.theo ?? 0;
+  const leg = M.legFromContract(c, 1, 1, buyAt);
+  const now = Date.now() / 1000;
+  const a = M.analysePosition([leg], { S: chain.spot, r: chain.rate, now, vol: c.sigma ?? e.atmIV });
+  const payoff = chart('short'), say = h('p', { class: 'say' });
+  const state = { S: chain.spot, days: 0, vol: 0 };
+  let pointIndex = -1;
+  const update = () => {
+    const t = now + state.days * 86400;
+    const value = M.legValue(leg, state.S, t, chain.rate, state.vol), pl = (value - buyAt) * 100;
+    mount(say, 'If ', h('b', null, `${q.symbol.replace('^', '')} is at ${F.usd(state.S)}`), state.days ? ` in ${Math.round(state.days)} days` : ' right now',
+      state.vol ? ` and implied volatility ${state.vol > 0 ? 'rises' : 'falls'} ${F.num(Math.abs(state.vol) * 100, 0)} points` : '',
+      `, this option is worth about ${F.usd(value)} a share: `, h('b', { class: pl >= 0 ? 'up' : 'down' }, `${F.pnl(pl)} per contract`),
+      buyAt > 0 ? ` (${F.signedPct(value / buyAt - 1, 0)}) on a ${F.money(buyAt * 100)} purchase.` : '.');
+    if (pointIndex >= 0 && window.Plotly && payoff.data) window.Plotly.restyle(payoff, { x: [[state.S]], y: [[pl]] }, [pointIndex]);
+  };
+  const lo = a.grid[0], hi = a.grid[a.grid.length - 1];
+  const box = h('div', null,
+    h('div', { class: 'stats' },
+      stat('Bid', c.bid > 0 ? F.price(c.bid) : '—', { tip: 'bid' }), stat('Ask', c.ask > 0 ? F.price(c.ask) : '—', { tip: 'ask' }),
+      stat('Mid', F.price(c.mid), { tip: 'mid' }), stat('Last', F.price(c.last), { tip: 'last' }),
+      stat('Spread', c.spread != null ? `${F.price(c.spread)} (${F.pct(c.spreadPct, 0)})` : '—', { tip: 'spread', tone: c.spreadPct > 0.15 ? 'down' : '' }),
+      stat('Volume / OI', `${F.int(c.vol)} / ${F.int(c.oi)}`, { tip: 'oi' }),
+      stat('Implied vol', F.iv(c.sigma), { tip: 'iv', tone: 'amber', sub: c.iv != null && c.ivAsk != null ? `bid ${F.iv(c.ivBid)} · ask ${F.iv(c.ivAsk)}` : c.sigmaSrc === 'model' ? 'from neighbours' : null }),
+      stat('Model value', F.price(c.theo), { tiptext: 'What the pricing model says the option is worth at this volatility.' })),
+    h('div', { class: 'row', style: { margin: '8px 0' } },
+      btn('BUY → STRATEGY', () => { ctx.addLeg(c, 1); ctx.go('strategy'); }, 'buy', 'Add one bought contract to the strategy builder'),
+      btn('SELL → STRATEGY', () => { ctx.addLeg(c, -1); ctx.go('strategy'); }, 'sell', 'Add one sold contract to the strategy builder'),
+      btn('CALCULATOR', () => { ctx.prefs('calc', {}); Object.assign(app.ui.calc, { symbol: app.symbol, market: null, put: c.put, S: e.S, K: c.strike, days: Math.max(Math.round(e.days), 1), vol: Math.round((c.sigma ?? e.atmIV ?? 0.5) * 1000) / 10, q: e.q * 100 }); ctx.savePrefs(); ctx.go('calc'); }, '', 'Open this contract in the pricing calculator')),
+    h('div', { class: 'prose' }, s.paragraphs.map(t => h('p', null, t))),
+    s.warnings.length ? h('ul', { class: 'warnlist' }, s.warnings.map(w => h('li', null, w))) : null,
+    c.mark != null ? [
+      h('div', { class: 'split', tiptext: 'Left: intrinsic value. Right: time value.' },
+        h('div', { style: { width: (c.mark ? c.intrinsic / Math.max(c.mark, c.intrinsic) * 100 : 0) + '%', background: color } }),
+        h('div', { style: { flex: 1, background: `repeating-linear-gradient(135deg, ${color} 0 2px, transparent 2px 6px)`, opacity: 0.8 } })),
+      h('p', { class: 'note small' }, `Price ${F.usd(c.mark)} = intrinsic ${F.usd(Math.min(c.intrinsic, c.mark))} + time value ${F.usd(c.extrinsic)}`)] : null,
+    s.greeks.length ? [h('h2', { class: 'sub' }, 'The Greeks, in dollars per contract'),
+      h('div', { class: 'greeks' }, s.greeks.map(g => [h('span', { class: 'g', tip: g.key }, g.key), h('span', { class: 'n' }, g.value), h('span', { class: 't' }, g.text)])),
+      h('p', { class: 'note small' }, h('a', { href: '#', onclick: ev => { ev.preventDefault(); ctx.openLesson('delta'); } }, 'Learn what each Greek means →'))] : null,
+    h('h2', { class: 'sub' }, `Buying one contract at ${F.usd(buyAt)}`),
+    payoff,
+    h('h2', { class: 'sub' }, 'What if…'),
+    slider({ label: 'Stock price', min: lo, max: hi, step: (hi - lo) / 400, value: state.S, format: F.usd, onInput: v => { state.S = v; update(); } }),
+    slider({ label: 'Days from now', min: 0, max: Math.max(Math.floor(e.days), 0), step: 1, value: 0, format: v => `${v}d`, onInput: v => { state.days = v; update(); }, tip: 'theta' }),
+    slider({ label: 'Implied volatility', min: -0.5, max: 0.5, step: 0.01, value: 0, format: v => `${v >= 0 ? '+' : ''}${F.num(v * 100, 0)} pts`, onInput: v => { state.vol = v; update(); }, tip: 'vega' }),
+    say);
+  requestAnimationFrame(() => {
+    if (!payoff.isConnected) return;
+    pointIndex = drawPayoff(payoff, a, { spot: chain.spot, point: { x: state.S, y: (M.legValue(leg, state.S, now, chain.rate) - buyAt) * 100 } });
+    update();
+  });
+  return box;
+}
