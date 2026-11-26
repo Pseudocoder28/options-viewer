@@ -1,5 +1,6 @@
-// Checks for the options math. Run:  node tests.mjs
-// With the server running (uv run server.py) it also smoke-tests the chain model on live data.
+// Checks for the options maths and the chain model. Run:  node tests.mjs
+// Everything here runs offline. With the server running (uv run server.py) tests-model.mjs also
+// builds live chains and checks that every number in them is sane.
 import assert from 'node:assert/strict';
 import * as Q from './static/js/quant.js';
 
@@ -80,6 +81,26 @@ test('binomial tree agrees with Black-Scholes and prices early exercise', () => 
   const euro = Q.bsPrice(80, 100, 1, 0.06, 0, 0.25, true), amer = Q.binomial(itmPut, 400, true);
   assert.ok(amer > euro + 0.3 && amer >= 20, `american put ${amer} should exceed european ${euro} and intrinsic 20`);
   close(Q.binomial({ S: 100, K: 100, T: 1, r: 0.05, q: 0, vol: 0.2 }, 800, true), 10.450583572185565, 0.01, 'american call without dividends equals european');
+  // American values from the literature (and an independent Leisen-Reimer tree), at 800 steps.
+  for (const [o, want] of [[{ S: 100, K: 100, T: 1, r: 0.05, vol: 0.2, put: true }, 6.0902], [{ S: 36, K: 40, T: 1, r: 0.06, vol: 0.2, put: true }, 4.4864],
+                           [{ S: 40, K: 40, T: 2, r: 0.06, vol: 0.4, put: true }, 6.9233], [{ S: 100, K: 100, T: 0.5, r: 0.04, q: 0.08, vol: 0.3 }, 7.4848]])
+    close(Q.binomial(o, 800, true), want, 0.005, `american reference ${want}`);
+  const noDiv = { S: 100, K: 110, T: 1, r: 0.045, q: 0, vol: 0.6 };
+  assert.equal(Q.binomial(noDiv, 400, true) - Q.binomial(noDiv, 400, false), 0, 'no early-exercise premium on a call without dividends');
+  // Greeks read off the tree by bumping are smooth (a plain tree gives zeros and spikes for gamma).
+  const tree = x => Q.binomial(x, 300, true), base = { S: 100, K: 100, T: 90 / 365, r: 0.045, q: 0, vol: 0.3 };
+  for (const S of [97, 99, 100, 101, 104]) close(Q.numericGreeks(tree, { ...base, S }).gamma, Q.bsm({ ...base, S }).gamma, 0.05 * Q.bsm({ ...base, S }).gamma, `tree gamma at ${S}`);
+  close(Q.solveVol(v => Q.binomial({ S: 80, K: 100, T: 1, r: 0.06, q: 0, vol: v, put: true }, 300, true), 21.5), 0.3209, 0.002, 'volatility solved on the tree');
+});
+
+test('degenerate inputs give sensible answers, never NaN', () => {
+  assert.ok(Q.binomial({ S: 80, K: 100, T: 1, r: 0.05, vol: 0.002, put: true }, 300, true) >= 20, 'an american put is worth at least what exercising pays');
+  assert.equal(Q.impliedVol(5, 100, 100, 1, NaN, 0, false), null, 'no volatility from a rate that is not a number');
+  const sure = Q.bsm({ S: 100, K: 101, T: 1, r: 0.05, vol: 0 });       // with no volatility the forward (105.1) is above the strike: certain to pay
+  assert.equal(sure.delta, 1); assert.equal(sure.probITM, 1); close(sure.price, 100 - 101 * Math.exp(-0.05), 1e-12, 'zero-volatility value');
+  for (const k of ['price', 'delta', 'gamma', 'theta', 'vega', 'rho']) assert.ok(Number.isFinite(Q.bsm({ S: 0, K: 100, T: 1, r: 0.05, vol: 0.2 })[k]), `${k} at a zero stock price`);
+  assert.equal(Q.numericGreeks(x => Q.bsm(x).price, { S: 100, K: 100, T: 0, r: 0.04, vol: 0.3 }).theta, 0, 'no decay left at expiry');
+  close(Q.cdf(-10), 7.619853024160593e-24, 1e-30, 'far tail'); close(Q.bsPrice(42, 40, 0.5, 0.10, 0, 0.2, false), 4.7594, 1e-4, 'Hull, call'); close(Q.bsPrice(42, 40, 0.5, 0.10, 0, 0.2, true), 0.8086, 1e-4, 'Hull, put');
 });
 
 test('probabilities, statistics and interpolation helpers', () => {
@@ -98,7 +119,7 @@ test('probabilities, statistics and interpolation helpers', () => {
   assert.equal(roll[19], null); close(roll[300], Q.realizedVol(closes, 20), 1e-12, 'rolling equals point value');
 });
 
-// ---- model checks are appended below once model.js exists (see MODEL TESTS) ----
-const model = await import('./static/js/model.js').catch(() => null);
-if (model) await (await import('./tests-model.mjs')).run(model, test, close);
+// ---- the chain model and strategy maths (tests-model.mjs); its live checks need the server running
+const model = await import('./static/js/model.js');
+await (await import('./tests-model.mjs')).run(model, test, close);
 console.log(`\n${passed} checks passed`);

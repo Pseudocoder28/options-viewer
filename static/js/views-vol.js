@@ -1,11 +1,15 @@
 // Volatility view (skew, term structure, surface) and Open Interest view (positioning by strike).
 import * as M from './model.js';
 import * as F from './fmt.js';
-import { h, append, mount, plot, chart, panel, table, empty, note, seg, check, C, vline, hline, scene3d, whenVisible } from './ui.js';
+import { h, append, mount, plot, chart, panel, table, empty, note, seg, check, values, C, vline, hline, scene3d, whenVisible } from './ui.js';
 import { expiryPicker } from './expiries.js';
 
 const noChain = (root, ctx) => append(root, ctx.noChain());
-const expLabel = e => F.date(e.date) + (e.days > 300 ? ` '${e.date.slice(2, 4)}` : '') + (e.label !== e.date ? ` ${e.root}` : '');
+const expLabel = F.expiryName;
+const ACROSS = [['strike', 'Strike'], ['money', '% of price']];
+const OI_WINDOWS = [[8, '±8'], [15, '±15'], [30, '±30'], [0, 'All']];
+const TIME_EXPIRIES = 30;     // "open interest by expiry" shows this many expiries at most
+let surfaceCamera = null;     // where the 3D surface was left: { symbol, camera }. Kept across refreshes, never saved.
 /** Position of a value on a category axis whose categories are the sorted numbers in `cats`. */
 function catPos(cats, v) {
   if (v <= cats[0]) return 0;
@@ -18,11 +22,12 @@ function catPos(cats, v) {
 export function vol(root, ctx) {
   const { app } = ctx, chain = app.chain, q = app.quote;
   if (!chain) return noChain(root, ctx);
-  const withSmile = chain.expiries.filter(e => e.smile?.length >= 1 && e.smileSrc === 'quotes');
-  const p = ctx.prefs('vol', { x: 'strike', band: true, picks: {} });
+  const withSmile = chain.expiries.filter(e => e.smile?.length >= 1);        // every expiry with at least one real quote to plot
+  const p = ctx.prefs('vol', { x: 'strike', band: true, picks: {} }, { x: values(ACROSS) });
   const set = patch => { Object.assign(p, patch); ctx.savePrefs(); ctx.rerenderView(); };
   // Remember chosen expiries per symbol; start with the nearest few that have at least two points.
-  let picks = (p.picks[app.symbol] || []).filter(l => withSmile.some(e => e.label === l));
+  const mine = p.picks[app.symbol];
+  let picks = (Array.isArray(mine) ? mine : []).filter(l => withSmile.some(e => e.label === l));
   if (!picks.length) picks = (withSmile.filter(e => e.smile.length >= 2 && e.days >= 2).length ? withSmile.filter(e => e.smile.length >= 2 && e.days >= 2) : withSmile).slice(0, 4).map(e => e.label);
   const toggle = label => {
     const next = picks.includes(label) ? picks.filter(l => l !== label) : [...picks, label].slice(-5);
@@ -33,7 +38,7 @@ export function vol(root, ctx) {
   const skew = chart('tall'), term = chart(), surf = chart('xl');
   append(root,
     h('div', { class: 'toolbar' },
-      seg([['strike', 'Strike'], ['money', '% of price']], p.x, x => set({ x }), 'Across'),
+      seg(ACROSS, p.x, x => set({ x }), 'Across'),
       check('Bid–ask range', p.band, band => set({ band }), 'Bars from the volatility implied by the bid up to the one implied by the ask. Long bars mean the market is not pinning the number down.')),
     expiryPicker(withSmile, { on: e => picks.includes(e.label), onPick: e => toggle(e.label), label: 'Compare up to 5', compact: false }),
     panel('Volatility by strike: the skew', { cls: 's8', code: 'SKEW', lesson: ['iv', () => ctx.openLesson('iv')] }, skew),
@@ -99,7 +104,9 @@ export function vol(root, ctx) {
     const ticks = [1, 7, 30, 90, 365, 730].filter(d => d >= Math.min(...nodes.map(v => v.e.days)) * 0.7 && d <= Math.max(...nodes.map(v => v.e.days)) * 1.4);
     plot(surf, traces, { margin: { l: 0, r: 0, t: 0, b: 0 }, scene: {
       xaxis: scene3d('Strike, % of price'), yaxis: { ...scene3d('Days to expiry'), tickvals: ticks.map(Math.log10), ticktext: ticks.map(String) }, zaxis: scene3d('IV %'),
-      camera: { eye: { x: 1.5, y: -1.8, z: 0.75 } }, aspectratio: { x: 1.2, y: 1.2, z: 0.7 } } }, { scrollZoom: true });
+      camera: surfaceCamera?.symbol === app.symbol ? surfaceCamera.camera : { eye: { x: 1.5, y: -1.8, z: 0.75 } }, aspectratio: { x: 1.2, y: 1.2, z: 0.7 } } }, { scrollZoom: true });
+    // Remember how the surface was turned, so the minute's refresh does not swing it back.
+    surf.on?.('plotly_relayout', change => { if (change['scene.camera']) surfaceCamera = { symbol: app.symbol, camera: change['scene.camera'] }; });
   });
 
   // --- table
@@ -107,16 +114,16 @@ export function vol(root, ctx) {
   append(root, panel('Volatility by expiry, in numbers', { cls: 'flush', code: `${rows.length} EXPIRIES` }, table([
     { label: 'Expiry', cls: 'l', cell: e => [F.weekday(e.date), ' ', F.dateLong(e.date), e.label !== e.date ? ` ${e.root}` : ''] },
     { label: 'Days', cell: e => F.days(e.days) },
-    { label: 'ATM IV', tip: 'iv', cell: e => h('span', { class: e.smileSrc === 'borrowed' ? 'muted' : 'amber' }, F.iv(e.atmIV)) },
+    { label: 'ATM IV', tip: 'iv', cell: e => h('span', { class: e.smileSrc === 'quotes' ? 'amber' : 'muted' }, F.iv(e.atmIV)) },
     { label: '25Δ put IV', tiptext: 'Volatility of the put with a delta of -0.25: a strike moderately below the price.', cell: e => F.iv(M.riskReversal(e, chain.rate)?.put.iv) },
     { label: '25Δ call IV', tiptext: 'Volatility of the call with a delta of 0.25: a strike moderately above the price.', cell: e => F.iv(M.riskReversal(e, chain.rate)?.call.iv) },
     { label: 'Call − put', tip: 'skew', cell: e => { const r = M.riskReversal(e, chain.rate); return r ? h('span', { class: r.rr < -0.02 ? 'putc' : r.rr > 0.02 ? 'callc' : '' }, F.signed(r.rr * 100, 1) + ' pts') : '—'; } },
     { label: 'Straddle', tiptext: 'Cost of the at-the-money call plus put.', cell: e => F.price(e.straddle) },
     { label: '± Move', tip: 'em', cell: e => `${F.usd(e.em)} (${F.pct(e.em / e.F)})` },
     { label: 'Forward', tip: 'forward', cell: e => h('span', { class: e.forwardSrc === 'parity' ? '' : 'muted' }, F.price(e.F)) },
-    { label: 'Points', tiptext: 'How many strikes had a quote good enough to measure volatility.', cell: e => (e.smileSrc === 'borrowed' ? 'borrowed' : e.smile.length) },
+    { label: 'Points', tiptext: 'How many strikes had a quote good enough to measure volatility.', cell: e => (e.smileSrc === 'quotes' ? e.smile.length : e.smile.length ? `${e.smile.length}, far out` : 'none') },
   ], rows, { onRow: e => { app.expiry = e.label; app.selected = null; ctx.go('chain'); }, rowClass: e => (e.label === app.expiry ? 'on' : '') }),
-  note('Grey figures are estimates: a volatility borrowed from the nearest expiry, or a forward built from interest rates because calls and puts were not both quoted. "Call − put" below zero means downside protection costs more than upside.')));
+  note('Grey figures are estimates: a volatility borrowed from the nearest expiry or guessed from far-away strikes, or a forward built from interest rates because calls and puts were not both quoted. "Call − put" below zero means downside protection costs more than upside.')));
 }
 
 // ---------------------------------------------------------------- open interest
@@ -124,12 +131,12 @@ export function vol(root, ctx) {
 export function oi(root, ctx) {
   const { app } = ctx, chain = app.chain, q = app.quote, sym = q.symbol.replace('^', '');
   if (!chain) return noChain(root, ctx);
-  const p = ctx.prefs('oi', { scope: 'expiry', window: 15 });
+  const p = ctx.prefs('oi', { scope: 'expiry', window: 15 }, { scope: ['expiry', 'near', 'all'], window: values(OI_WINDOWS) });
   const set = patch => { Object.assign(p, patch); ctx.savePrefs(); ctx.rerenderView(); };
   const exp = ctx.expiry() || chain.expiries[0];
   const scope = p.scope === 'expiry' ? [exp] : p.scope === 'near' ? chain.expiries.filter(e => e.days <= 45) : chain.expiries;
   const scopeName = p.scope === 'expiry' ? expLabel(exp) : p.scope === 'near' ? 'expiries in the next 45 days' : 'all expiries';
-  let rows = M.byStrike(scope.length ? scope : [exp], chain.spot);
+  let rows = M.byStrike(scope.length ? scope : [exp]);
   if (p.window && rows.length) {
     const at = rows.reduce((best, r, i) => (Math.abs(r.strike - chain.spot) < Math.abs(rows[best].strike - chain.spot) ? i : best), 0);
     rows = rows.filter((r, i) => Math.abs(i - at) <= p.window);
@@ -142,7 +149,7 @@ export function oi(root, ctx) {
     expiryPicker(chain.expiries, { on: e => e === exp, onPick: e => ctx.setExpiry(e.label) }),
     h('div', { class: 'toolbar' },
       seg([['expiry', expLabel(exp)], ['near', 'Next 45 days'], ['all', 'All expiries']], p.scope, s => set({ scope: s }), 'Scope'),
-      seg([[8, '±8'], [15, '±15'], [30, '±30'], [0, 'All']], p.window, window => set({ window }), 'Strikes')),
+      seg(OI_WINDOWS, p.window, window => set({ window }), 'Strikes')),
     panel(`Open interest by strike · ${scopeName}`, { cls: 's6', code: 'OI', lesson: ['chain', () => ctx.openLesson('chain')] }, oiChart,
       note('Contracts that exist right now. Calls rise above the line, puts hang below it. Tall bars mark prices where many traders have something at stake.')),
     panel(`Volume today by strike · ${scopeName}`, { cls: 's6', code: 'VOL' }, volChart,
@@ -182,8 +189,9 @@ export function oi(root, ctx) {
   }
 
   // positions through time
-  const es = chain.expiries.slice(0, 30);
-  append(root, panel('Open interest by expiry', { code: 'TIME' }, timeChart, note('Where the open contracts sit in time. Monthly expiries (third Friday) usually hold the most.')));
+  const es = chain.expiries.slice(0, TIME_EXPIRIES);
+  append(root, panel('Open interest by expiry', { code: 'TIME' }, timeChart, note('Where the open contracts sit in time. Monthly expiries (third Friday) usually hold the most.',
+    chain.expiries.length > TIME_EXPIRIES ? ` The first ${TIME_EXPIRIES} of ${chain.expiries.length} expiries are shown.` : '')));
   whenVisible(timeChart, () => plot(timeChart, [
     { type: 'bar', name: 'Calls', x: es.map(expLabel), y: es.map(e => e.stats.callOI), marker: { color: C.call }, hovertemplate: '%{x} calls: %{y:,.0f}<extra></extra>' },
     { type: 'bar', name: 'Puts', x: es.map(expLabel), y: es.map(e => -e.stats.putOI), customdata: es.map(e => e.stats.putOI), marker: { color: C.put }, hovertemplate: '%{x} puts: %{customdata:,.0f}<extra></extra>' },

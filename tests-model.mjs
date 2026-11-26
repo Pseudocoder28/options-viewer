@@ -1,5 +1,6 @@
-// Model checks, run by tests.mjs. Strategy maths is checked on fixed inputs; the chain model is
-// smoke-tested on live data when the local server is reachable.
+// Model checks, run by tests.mjs. Strategy maths and the chain model are checked offline, on fixed
+// inputs and on made-up chains whose true values are known. When the local server is reachable the
+// chain model is also run on live data.
 import assert from 'node:assert/strict';
 import * as Q from './static/js/quant.js';
 
@@ -61,6 +62,154 @@ export async function run(M, test, close) {
     assert.equal(M.occSymbol('SPXW', '2026-11-20', false, 7335), 'SPXW261120C07335000');
   });
 
+  // ---- a made-up chain with known answers, so the chain model can be checked without the network
+  const iso = t => new Date(t * 1000).toISOString().slice(0, 10);
+  /**
+   * Build the payloads the server would send for a chain whose true values are known.
+   * vol(k) is the true volatility at log-moneyness k = ln(strike / forward). Every contract is quoted
+   * at its exact Black-Scholes value plus and minus half the spread, unless `only` says otherwise.
+   */
+  function made({ S = 100, rate = 0.04, yld = 0, days = [30], strikes, vol = () => 0.3, spread = 0.02, oi = 100, state = 'REGULAR', only = () => true, extra = () => ({}) }) {
+    const expiries = days.map(d => ({ date: iso(now + d * day), root: 'TEST', am: false, close: now + d * day, label: iso(now + d * day) }));
+    const rows = [];
+    expiries.forEach((e, i) => {
+      const T = days[i] / 365, F = S * Math.exp((rate - yld) * T);
+      for (const K of strikes) for (const put of [0, 1]) {
+        const fair = Q.bsPrice(S, K, T, rate, yld, vol(Math.log(K / F)), !!put), quoted = only(K, put);
+        rows.push([i, K, put, quoted ? Math.max(fair - spread / 2, 0.01) : 0, quoted ? fair + spread / 2 : 0, null, null, 10, oi, null].map((v, j) => extra(K, put)[j] ?? v));
+      }
+    });
+    return { raw: { symbol: 'TEST', source: 'made up', asOf: now, adjustedDropped: 0, expiries, fields: ['e', 'strike', 'put', 'bid', 'ask', 'last', 'chg', 'vol', 'oi', 'lastTrade'], rows },
+             quote: { symbol: 'TEST', price: S, rate, dividendYield: yld, marketState: state, time: now, type: 'EQUITY' } };
+  }
+  const range = (from, to, step) => Array.from({ length: Math.round((to - from) / step) + 1 }, (_, i) => from + i * step);
+  const finite = chain => chain.contracts.every(c => ['theo', 'delta', 'gamma', 'theta', 'vega'].every(k => c[k] === null || Number.isFinite(c[k])));
+
+  test('made-up chain: forward, volatility, skew and max pain are recovered', () => {
+    const smile = k => 0.25 - 0.12 * k + 0.35 * k * k;
+    const { raw, quote } = made({ yld: 0.015, days: [7, 30, 60, 180, 365], strikes: range(60, 150, 2.5), vol: smile });
+    const chain = M.buildChain(raw, quote, now), e = chain.expiries[1];
+    close(e.F, 100 * Math.exp(0.025 * 30 / 365), 0.002, 'forward from put-call parity');
+    for (const x of chain.expiries) { close(x.atmIV, 0.25, 0.001, `at-the-money vol, ${x.label}`); assert.equal(x.smileSrc, 'quotes'); }
+    close(chain.iv30, 0.25, 0.001, '30-day vol');
+    const rr = M.riskReversal(e, chain.rate);
+    assert.ok(rr.put.strike < e.F && rr.call.strike > e.F && rr.rr < -0.005 && rr.rr > -0.02, `puts dearer than calls, as the made-up smile says: ${rr.rr}`);
+    close(rr.put.iv, smile(Math.log(rr.put.strike / e.F)), 0.002, '25-delta put vol sits on the true smile');
+    const brute = e.strikes.map(s => Q.sum(e.calls.map(c => c.oi * Math.max(s - c.strike, 0))) + Q.sum(e.puts.map(c => c.oi * Math.max(c.strike - s, 0))));
+    assert.equal(e.maxPain, e.strikes[brute.indexOf(Math.min(...brute))], 'max pain equals the brute-force minimum');
+    assert.ok(finite(chain), 'no bad numbers');
+    const atm = e.rows.get(100).call;
+    assert.equal(atm.sigmaSrc, 'smile'); assert.equal(e.rows.get(110).call.sigmaSrc, 'own');     // in the money reads the curve, out of the money its own quote
+  });
+
+  test('a closed market does not inflate near-dated volatility', () => {
+    const args = { days: [3, 28], strikes: range(80, 120, 2.5), vol: () => 0.2 };
+    const later = now + 2 * day + 4 * 3600;                       // quotes frozen at the close, read 52 hours on
+    const shut = made({ ...args, state: 'CLOSED' }), open = made({ ...args, state: 'REGULAR' });
+    const frozen = M.buildChain(shut.raw, shut.quote, later).expiries[0], ticking = M.buildChain(open.raw, open.quote, later).expiries[0];
+    close(frozen.atmIV, 0.2, 0.002, 'volatility as of the close');
+    close(frozen.days, 20 / 24, 1e-9, 'days to expiry still count from the clock');
+    assert.ok(ticking.atmIV > 0.3, `the same quotes measured against a running clock read ${ticking.atmIV}`);
+  });
+
+  test('an old last trade never overrides a live quote', () => {
+    // Only the at-the-money call and put are quoted. Nine contracts carry a last trade from when the stock was at 80.
+    const stale = (K, put) => (K >= 80 && K <= 100 ? { 5: Q.bsPrice(80, K, 45 / 365, 0.04, 0, 0.4, !!put) } : {});
+    const { raw, quote } = made({ days: [45], strikes: range(30, 175, 5), vol: () => 0.4, spread: 0.1, only: K => K === 100, extra: stale });
+    const e = M.buildChain(raw, quote, now).expiries[0], call = e.rows.get(100).call;
+    assert.equal(e.mode, 'live');
+    close(call.mark, Q.bsPrice(100, 100, 45 / 365, 0.04, 0, 0.4, false), 1e-9, 'the mark is the mid of the live quote');
+    close(e.F, 100 * Math.exp(0.04 * 45 / 365), 0.05, 'forward'); close(e.atmIV, 0.4, 0.005, 'at-the-money vol'); close(call.delta, 0.542, 0.01, 'delta');
+  });
+
+  test('thin, empty and one-sided chains build without bad numbers', () => {
+    const none = made({ strikes: [] });
+    assert.deepEqual(M.buildChain(none.raw, none.quote, now).expiries, []);
+    const unquoted = made({ strikes: range(90, 110, 5), only: () => false });
+    const u = M.buildChain(unquoted.raw, unquoted.quote, now);
+    assert.equal(u.expiries[0].mode, 'none'); assert.ok(u.contracts.every(c => c.sigma === null) && u.iv30 === null && !u.ivMeasured);
+    const expired = made({ days: [-1, 20], strikes: range(90, 110, 5) });
+    assert.equal(M.buildChain(expired.raw, expired.quote, now).expiries.length, 1, 'an expired expiry is dropped');
+    // Quotes exist only far below the money: the volatility is a flagged guess, never passed off as a measurement.
+    const wing = made({ strikes: range(50, 75, 5), vol: k => 0.35 - 0.6 * k });
+    const w = M.buildChain(wing.raw, wing.quote, now);
+    assert.equal(w.expiries[0].smileSrc, 'wing'); assert.equal(w.ivMeasured, false); assert.ok(finite(w));
+    // With a properly quoted neighbour, the thin expiry takes the neighbour's level at the money instead.
+    const mixed = made({ days: [20, 40], strikes: range(50, 150, 5), vol: () => 0.3, only: (K, put) => K <= 75 || put === 9 });
+    mixed.raw.rows.forEach((row, i) => { if (row[0] === 1 && !row[3]) { const fair = Q.bsPrice(100, row[1], 40 / 365, 0.04, 0, 0.3, !!row[2]); mixed.raw.rows[i][3] = Math.max(fair - 0.01, 0.01); mixed.raw.rows[i][4] = fair + 0.01; } });
+    const m = M.buildChain(mixed.raw, mixed.quote, now);
+    assert.equal(m.expiries[0].smileSrc, 'borrowed'); assert.equal(m.expiries[1].smileSrc, 'quotes'); close(m.expiries[0].atmIV, m.expiries[1].atmIV, 1e-12, 'borrowed level');
+    const flatOI = made({ strikes: [95, 105], oi: 0 });
+    assert.equal(M.buildChain(flatOI.raw, flatOI.quote, now).expiries[0].maxPain, null, 'no open interest, no max pain');
+  });
+
+  test('break-evens and odds when the payoff is flat at zero', () => {
+    const at = { S: 100, r, now, vol: 0.3 }, L = (kind, side, qty, strike, price) => leg(kind, side, qty, strike, price, 30, 0.3);
+    const cases = [
+      [[L('P', -1, 1, 95, 1.20), L('C', 1, 1, 105, 1.20)], [95, 105], 0.28364],          // costs nothing, flat between the strikes
+      [[L('C', 1, 1, 105, 0)], [105], 0.28364],                                             // a free call
+      [[L('C', 1, 1, 100, 0.05), L('C', -2, 1, 105, 0.03), L('C', 1, 1, 110, 0.01)], [100, 110], 0.36523],   // a butterfly entered at zero
+      [[L('C', 1, 1, 90, 12.50), L('C', -1, 1, 95, 7.50)], [95], 0],                        // paid the most it can ever be worth
+    ];
+    for (const [legs, want, odds] of cases) {
+      const a = M.analysePosition(legs, at);
+      assert.equal(a.breakevens.length, want.length, `break-evens ${a.breakevens} for ${M.nameOf(legs)}`);
+      want.forEach((x, i) => close(a.breakevens[i], x, 1e-6, 'break-even'));
+      close(a.pop, odds, 2e-4, 'chance of profit');
+    }
+    const soon = M.analysePosition([leg('C', 1, 1, 100, 0.02, 60 / day, 0.3)], at);         // one minute to expiry
+    assert.ok(soon.range[1] - soon.range[0] < 0.2, `the typical range has collapsed: ${soon.range}`);
+  });
+
+  test('strategy names are only given when sides and sizes really fit', () => {
+    const L = (kind, side, qty, strike, days = 30) => leg(kind, side, qty, strike, 1, days, 0.3);
+    const condor = [L('P', -1, 1, 95), L('P', 1, 1, 90), L('C', -1, 1, 105), L('C', 1, 1, 110)];
+    assert.equal(M.nameOf(condor), 'Iron condor');
+    const a = M.analysePosition([leg('P', -1, 1, 95, 1.5, 30, 0.3), leg('P', 1, 1, 90, 0.75, 30, 0.3), leg('C', -1, 1, 105, 1.4, 30, 0.3), leg('C', 1, 1, 110, 0.65, 30, 0.3)], { S: 100, r, now, vol: 0.3 });
+    close(a.cost, -150, 1e-9, 'credit'); close(a.maxProfit, 150, 1e-6, 'max profit'); close(a.maxLoss, -350, 1e-6, 'max loss');
+    close(a.breakevens[0], 93.5, 1e-6, 'lower'); close(a.breakevens[1], 106.5, 1e-6, 'upper'); close(a.pop, 0.55075, 2e-4, 'odds');
+    assert.equal(M.nameOf([L('C', 1, 1, 95), L('C', -1, 2, 100), L('C', 1, 1, 105)]), 'Long call butterfly');
+    assert.equal(M.nameOf([L('C', 1, 1, 95), L('C', 1, 1, 100), L('C', 1, 1, 105)]), 'Custom position', 'three bought calls are not a butterfly');
+    assert.equal(M.nameOf([L('C', 1, 1, 100), L('P', 1, 1, 100), L('C', 1, 1, 110), L('P', 1, 1, 90)]), 'Custom position', 'four bought options are not an iron condor');
+    assert.equal(M.nameOf([L('C', 1, 1, 100), L('C', -1, 2, 105)]), 'Custom position', 'one bought against two sold is not a plain spread');
+    assert.equal(M.nameOf([M.stockLeg(1, 100, 100), L('C', 1, 1, 105), L('P', -1, 1, 95)]), 'Custom position', 'a bought call and sold put on shares is not a collar');
+    assert.equal(M.nameOf([M.stockLeg(1, 100, 100), L('P', 1, 1, 95), L('C', -1, 1, 105)]), 'Collar');
+    assert.equal(M.nameOf([L('C', -1, 1, 100, 30), L('C', 1, 1, 100, 60)]), 'Calendar spread');
+  });
+
+  test('legs from a link: round trip, junk and hostile text', () => {
+    const { raw, quote } = made({ days: [30, 60], strikes: range(90, 110, 2.5) });
+    const chain = M.buildChain(raw, quote, now), [near, far] = chain.expiries;
+    const legs = [M.stockLeg(1, 100, 712.34), M.legFromContract(near.rows.get(100).call, 1, 3, 2.955), M.legFromContract(near.rows.get(95).put, -1, 12, 0.4), M.legFromContract(far.rows.get(102.5).call, -1, 1, 3.23)];
+    const back = M.decodeLegs(M.encodeLegs(legs), chain);
+    assert.equal(back.length, 4);
+    back.forEach((l, i) => { for (const k of ['kind', 'side', 'qty', 'strike', 'close', 'price']) assert.equal(l[k], legs[i][k], `leg ${i} ${k}`); assert.ok(M.validLeg(l)); });
+    for (const junk of ['garbage', '1S@5.', '1S@1e3', '+1S@1', ' 1S@1', '1x' + near.rows.get(100).call.symbol, '0S@1', '9'.repeat(400) + 'S@1', '1S@' + '9'.repeat(400)])
+      assert.deepEqual(M.decodeLegs(junk, chain), [], `"${junk.slice(0, 20)}" is dropped`);
+    const t0 = performance.now();
+    assert.deepEqual(M.decodeLegs('1S@' + '1'.repeat(80000) + 'x', chain), []);
+    assert.ok(performance.now() - t0 < 200, 'a huge number does not stall the page');
+    assert.equal(M.decodeLegs(Array(5000).fill('1S@1').join(','), chain).length, 20, 'at most 20 legs come out of a link');
+    for (const bad of [null, {}, { kind: 'C' }, { kind: 'S', side: 1, qty: 0, price: 1 }, { kind: 'C', side: 1, qty: 1, price: 1, strike: 5 }, { kind: 'S', side: 2, qty: 1, price: 1 }]) assert.equal(M.validLeg(bad), false);
+  });
+
+  test('templates, skew and term structure at their edges', () => {
+    const two = made({ strikes: [95, 105] }), e2 = M.buildChain(two.raw, two.quote, now).expiries[0];
+    assert.deepEqual(M.buildTemplate('Call butterfly', e2, 100), [], 'two strikes cannot make a butterfly');
+    assert.deepEqual(M.buildTemplate('Iron condor', e2, 100), []);
+    assert.equal(M.buildTemplate('Bull call spread', e2, 100).length, 2);
+    // At 110% volatility two years out even the forward strike has less than 25 delta on the put side: no reading rather than a wrong one.
+    const wild = made({ S: 1.705, days: [730], strikes: range(0.5, 10, 0.5), vol: k => 1.1 - 0.1 * k, spread: 0.002 });
+    assert.equal(M.riskReversal(M.buildChain(wild.raw, wild.quote, now).expiries[0], 0.04), null);
+    // A front-month spike (an event just ahead) survives the outlier filter.
+    const levels = [1.5, 0.62, 0.6, 0.58, 0.56, 0.55], spiky = made({ days: [3, 10, 17, 24, 45, 80], strikes: range(70, 130, 2.5), vol: () => 0.3 });
+    spiky.raw.rows.forEach(row => { const T = [3, 10, 17, 24, 45, 80][row[0]] / 365, fair = Q.bsPrice(100, row[1], T, 0.04, 0, levels[row[0]], !!row[2]); row[3] = Math.max(fair - 0.01, 0.01); row[4] = fair + 0.01; });
+    const ts = M.termStructure(M.buildChain(spiky.raw, spiky.quote, now));
+    assert.equal(ts.length, 6); close(ts[0].atmIV, 1.5, 0.02, 'the 3-day reading is kept');
+    assert.equal(M.expiryKind({ date: '2026-12-28', days: 30 }), 'weekly', 'a Monday near the quarter end is not the quarterly');
+    assert.equal(M.expiryKind({ date: '2026-12-16', days: 20, am: true, root: 'VIX' }), 'monthly', 'the VIX monthly falls on a Wednesday');
+  });
+
   let live = true;
   try { await fetch(BASE + '/api/quote?symbol=SPY', { signal: AbortSignal.timeout(20000) }); } catch { live = false; }
   if (!live) { console.log('--  server not running: skipped live chain checks'); return; }
@@ -77,7 +226,7 @@ export async function run(M, test, close) {
       for (const e of chain.expiries) {
         assert.ok(e.T > 0 && e.F > 0 && Number.isFinite(e.q), `forward for ${e.label}`);
         assert.ok(Math.abs(Math.log(e.F / quote.price)) < 0.7, `forward ${e.F} near spot`);
-        assert.ok(e.strikes.includes(e.maxPain) && e.strikes.includes(e.atmStrike));
+        assert.ok((e.maxPain == null || e.strikes.includes(e.maxPain)) && e.strikes.includes(e.atmStrike));
         if (e.atmIV != null) assert.ok(e.atmIV > 0.01 && e.atmIV < 10, `atm iv ${e.atmIV} for ${e.label}`);
         for (const c of [...e.calls, ...e.puts]) {
           if (c.sigma == null) continue;
@@ -88,8 +237,8 @@ export async function run(M, test, close) {
         }
       }
       assert.ok(priced > chain.contracts.length * 0.5, `only ${priced} of ${chain.contracts.length} contracts priced`);
-      const strip = chain.expiries.map(e => `${e.label.slice(5)}:${e.atmIV == null ? '-' : (e.atmIV * 100).toFixed(0)}${e.smileSrc === 'borrowed' ? 'b' : ''}${e.forwardSrc === 'parity' ? '' : '*'}`).slice(0, 14).join(' ');
-      console.log(`      spot ${quote.price}  iv30 ${chain.iv30 == null ? 'n/a' : (chain.iv30 * 100).toFixed(1) + '%'}  atm iv by expiry (b = borrowed, * = no parity forward): ${strip}`);
+      const strip = chain.expiries.map(e => `${e.label.slice(5)}:${e.atmIV == null ? '-' : (e.atmIV * 100).toFixed(0)}${{ borrowed: 'b', wing: 'w' }[e.smileSrc] || ''}${e.forwardSrc === 'parity' ? '' : '*'}`).slice(0, 14).join(' ');
+      console.log(`      spot ${quote.price}  iv30 ${chain.iv30 == null ? 'n/a' : (chain.iv30 * 100).toFixed(1) + '%'}  atm iv by expiry (b = borrowed, w = guessed from far strikes, * = no parity forward): ${strip}`);
     });
     if (symbol === 'GEMI') test('GEMI: the complete listing is present', () => {
       const dec = chain.expiries.find(e => e.date === '2026-12-04');

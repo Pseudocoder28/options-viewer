@@ -147,7 +147,6 @@ input[type="checkbox"], input[type="range"] { accent-color: var(--amber); }
 .prose p { font-family: var(--sans); font-size: calc(13px * var(--text)); line-height: 1.55; margin: 0 0 8px; }
 .warnlist { margin: 6px 0; padding: 0; list-style: none; }
 .warnlist li { font-family: var(--sans); font-size: calc(12.5px * var(--text)); color: var(--amber); border-left: 2px solid var(--amber); padding: 2px 8px; margin-bottom: 4px; background: var(--amber-bg); }
-.term { border-bottom: 1px dotted var(--muted); cursor: help; }
 [data-tip], [data-tiptext] { cursor: help; }
 button[data-tiptext], .chip[data-tiptext], .seg button[data-tiptext] { cursor: pointer; }
 
@@ -157,6 +156,7 @@ table.grid { border-collapse: collapse; width: 100%; font-variant-numeric: tabul
 .grid th { position: sticky; top: 0; background: var(--panel2); color: var(--muted); font-size: calc(10.5px * var(--text)); font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; padding: 4px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--line); z-index: 2; }
 .grid td { padding: 3px 8px; text-align: right; white-space: nowrap; border-bottom: 1px solid #161614; }
 .grid .l { text-align: left; } .grid .c { text-align: center; }
+.grid td.wrap { white-space: normal; min-width: 210px; }       /* a cell of running text may wrap */
 .grid tr.click { cursor: pointer; }
 .grid tr.click:hover td { background: #17140a; }
 .grid tr.on td { background: var(--amber-bg); }
@@ -281,6 +281,7 @@ h2.sub { font-size: calc(11px * var(--text)); color: var(--amber); text-transfor
 .modal-body { padding: 12px; max-height: 80vh; overflow: auto; }
 .help { display: grid; grid-template-columns: auto 1fr; gap: 5px 14px; align-items: baseline; }
 .help dt { color: var(--amber); white-space: nowrap; } .help dd { margin: 0; font-family: var(--sans); font-size: calc(13px * var(--text)); color: var(--ink2); }
+.gloss dd b { color: var(--ink); font-weight: 600; }
 .gloss dt { color: var(--amber); margin-top: 10px; } .gloss dd { margin: 2px 0 0; font-family: var(--sans); font-size: calc(13px * var(--text)); line-height: 1.5; color: var(--ink2); }
 
 /* ---------- lessons ---------- */

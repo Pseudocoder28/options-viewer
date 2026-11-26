@@ -3,7 +3,12 @@ const DASH = '—';
 const ok = x => x != null && Number.isFinite(x);
 const NY = 'America/New_York';
 
-export const num = (x, d = 2) => (ok(x) ? x.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }) : DASH);
+/** A number with d decimals. A value that rounds to zero prints as "0.00", never "-0.00". */
+export function num(x, d = 2) {
+  if (!ok(x)) return DASH;
+  const text = x.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+  return /^-0(\.0*)?$/.test(text) ? text.slice(1) : text;
+}
 
 /** Prices: two decimals, or three when a small price needs them (1.705). */
 export function price(x) {
@@ -31,7 +36,7 @@ export function strike(x) {
 export const pct = (x, d = 1) => (ok(x) ? num(x * 100, d) + '%' : DASH);
 export const signedPct = (x, d = 2) => (ok(x) ? (x > 0 ? '+' : '') + num(x * 100, d) + '%' : DASH);
 export const signed = (x, d = 2) => (ok(x) ? (x > 0 ? '+' : '') + num(x, d) : DASH);
-export const int = x => (ok(x) ? Math.round(x).toLocaleString('en-US') : DASH);
+export const int = x => num(x, 0);
 /** Implied volatility: whole percent above 20%, one decimal below. */
 export const iv = x => (ok(x) ? num(x * 100, x < 0.2 ? 1 : 0) + '%' : DASH);
 /** Greeks: d decimals, more for very small values so they never print as 0.000. */
@@ -72,6 +77,8 @@ export function nyStamp(epoch) {
   return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
 }
 
+/** An expiry for a label: "Dec 4", with the year when it is far off and the option root when two series share the date. */
+export const expiryName = e => date(e.date) + (e.days > 300 ? ` '${e.date.slice(2, 4)}` : '') + (e.label !== e.date ? ` ${e.root}` : '');
 export const contractName = c => `${date(c.exp.date)} ${strike(c.strike)} ${c.put ? 'put' : 'call'}`;
 export const legName = l => (l.kind === 'S' ? 'shares' : `${date(l.date)} ${strike(l.strike)} ${l.kind === 'P' ? 'put' : 'call'}`);
 export const plural = (n, word) => `${int(n)} ${word}${Math.abs(n) === 1 ? '' : 's'}`;

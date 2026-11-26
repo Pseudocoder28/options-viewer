@@ -1,5 +1,13 @@
 // App core: state, data loading, routing, command line, watchlist, keyboard and the page chrome.
 // Each view is a function render(root, ctx) in a views-*.js module.
+//
+// How a screen comes about:
+//   1. load(symbol) asks the server for the quote, the option chain and a year of prices.
+//   2. model.buildChain turns the raw chain into the analysed one (volatility, Greeks, statistics).
+//   3. render() draws the chrome (tabs, quote bar, watch strip, status bar) and calls the current
+//      view's render(root, ctx), which rebuilds its part of the page from `app`.
+// Nothing is patched in place: every change of state is followed by a redraw. keepFocus puts the
+// keyboard focus back afterwards, and syncUrl keeps the address bar describing the screen.
 import * as M from './model.js';
 import * as Q from './quant.js';
 import * as F from './fmt.js';
@@ -28,22 +36,43 @@ const WORDS = { OVERVIEW: 'overview', PRICE: 'price', CHAIN: 'chain', VOLATILITY
 const CODES = { ...WORDS, OV: 'overview', DES: 'overview', GP: 'price', CHART: 'price', OC: 'chain', OMON: 'chain', VOL: 'vol', SKEW: 'vol', SURF: 'vol',
                 OI: 'oi', FLOW: 'oi', GEX: 'oi', STRAT: 'strategy', PL: 'strategy', CALC: 'calc', EDU: 'learn' };
 const DEFAULT_WATCH = ['SPY', 'QQQ', 'IWM', '^SPX', '^VIX', 'AAPL', 'NVDA', 'TSLA'];
+const MAX_WATCH = 40;        // the server prices at most this many tickers in one request
+const TEXT_SIZES = [[1, 'A', 'Normal text'], [1.12, 'A', 'Larger text'], [1.25, 'A', 'Largest text']];
 const FRESH_MS = 55000;      // a ticker loaded more recently than this is shown without asking the server again
 const KEEP_TICKERS = 6;      // how many recent tickers stay in memory, ready to show at once
 const $ = id => document.getElementById(id);
 
+// ---------------------------------------------------------------- saved settings
+// Everything the app keeps in the browser is read through stored(). A value of the wrong shape
+// (damaged storage, or one left by an older version) falls back to its default instead of breaking the page.
+const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+const isTicker = v => typeof v === 'string' && /^[A-Z0-9.^=-]{1,20}$/.test(v);     // the same rule the server applies
+const stored = (key, fallback, valid) => { const v = disk.get(key, fallback); return valid(v) ? v : fallback; };
+const cleanLegs = legs => (Array.isArray(legs) ? legs.filter(M.validLeg) : []);
+
 export const app = {
+  // --- what is on screen
   symbol: null, quote: null, chain: null, chainError: null, hv: null, hist: {}, loadedAt: 0,
-  error: null, failed: null,   // the message of a load that failed, and the ticker it was for (RETRY loads it again)
+  view: 'overview', expiry: null, selected: null,
+  // --- loading
   loading: false,        // a request is in flight (drives the progress bar)
   pending: null,         // ticker that was asked for but has no data yet (drives the placeholders)
   chainLoading: false,   // the price is in, the option chain is still on its way
   want: null,            // { exp, c, legs } from the address bar, applied once the chain is there
-  view: 'overview', expiry: null, selected: null,
-  ui: disk.get('ui', {}), watch: disk.get('watch', DEFAULT_WATCH), watchQuotes: {},
-  legs: disk.get('legs', {}), saved: disk.get('saved', []), lesson: disk.get('lesson', 'basics'), done: disk.get('done', {}),
-  autoRefresh: disk.get('auto', true), message: null,
-  text: disk.get('text', 1),   // text size multiplier (the A A A control)
+  error: null, failed: null,   // the message of a load that failed, and the ticker it was for (RETRY loads it again)
+  refreshFailed: false,  // the latest refresh of the ticker on screen failed, so its numbers are getting old
+  message: null,         // the latest status-bar message: { text, isError, at }
+  // --- kept in the browser between visits
+  ui: stored('ui', {}, isObj),                                    // per-view settings, see ctx.prefs
+  watch: stored('watch', DEFAULT_WATCH, Array.isArray).filter(isTicker).slice(0, MAX_WATCH),
+  watchQuotes: {},
+  legs: Object.fromEntries(Object.entries(stored('legs', {}, isObj)).map(([symbol, legs]) => [symbol, cleanLegs(legs)])),   // strategy legs per ticker
+  saved: stored('saved', [], Array.isArray).filter(s => isObj(s) && isTicker(s.symbol))                                    // saved positions
+    .map(s => ({ ...s, name: String(s.name ?? s.symbol), legs: cleanLegs(s.legs) })).filter(s => s.legs.length),
+  lesson: stored('lesson', 'basics', v => typeof v === 'string'),
+  done: stored('done', {}, isObj),                                // lessons marked as read
+  autoRefresh: stored('auto', true, v => typeof v === 'boolean'),
+  text: stored('text', 1, v => TEXT_SIZES.some(size => size[0] === v)),   // text size multiplier (the A A A control)
 };
 const recent = new Map();     // ticker -> { quote, chain, chainError, hv, loadedAt, expiry }
 let loadToken = 0, rerenderTimer = 0;
@@ -58,11 +87,23 @@ async function api(path) {
 
 const ctx = {
   app, api,
-  /** Per-view preferences that survive re-renders and reloads. */
-  prefs(view, defaults) { app.ui[view] = { ...defaults, ...app.ui[view] }; return app.ui[view]; },
+  /**
+   * Per-view settings that survive re-renders and reloads: prefs('chain', { cols: 'basic' }, { cols: ['basic', 'greeks'] }).
+   * A saved value is kept only when it has the type of its default and, where a list of choices is
+   * given, is one of them. Anything else falls back to the default, so a value left by an older
+   * version can never break a view.
+   */
+  prefs(view, defaults, choices = {}) {
+    const kept = Object.entries(isObj(app.ui[view]) ? app.ui[view] : {}).filter(([key, value]) => {
+      if (!(key in defaults) || defaults[key] === null) return true;            // nothing to compare with
+      const sameType = typeof value === typeof defaults[key] && Array.isArray(value) === Array.isArray(defaults[key]);
+      return sameType && (!choices[key] || choices[key].includes(value));
+    });
+    return (app.ui[view] = { ...defaults, ...Object.fromEntries(kept) });
+  },
   savePrefs() { disk.set('ui', app.ui); },
   /** Switch view. Each switch is a step the Back button can undo. */
-  go(view) { if (app.view !== view) { app.view = view; syncUrl(true); } render(); scrollTo(0, 0); },
+  go(view) { dropOldError(); if (app.view !== view) { app.view = view; syncUrl(true); } render(); scrollTo(0, 0); },
   load: (symbol, view) => navigate(symbol, view),
   render: () => render(),
   /** Redraw the view on the next tick, so a Tab or click that caused the change lands first and focus is kept. */
@@ -103,7 +144,7 @@ const ctx = {
 /** Put a remembered ticker on screen. */
 function show(symbol, snap) {
   Object.assign(app, { symbol, quote: snap.quote, chain: snap.chain, chainError: snap.chainError, hv: snap.hv, loadedAt: snap.loadedAt,
-                       expiry: snap.expiry ?? null, selected: null, error: null, pending: null, chainLoading: false });
+                       expiry: snap.expiry ?? null, selected: null, error: null, failed: null, refreshFailed: false, pending: null, chainLoading: false });
   pickExpiry();
 }
 function pickExpiry() {
@@ -155,7 +196,7 @@ async function load(symbol, { quiet = false } = {}) {
     const quote = await api('/api/quote?symbol=' + q);
     if (token !== loadToken) return;
     if (app.pending) {      // the price is in: show it now, the chain usually lands a moment later
-      Object.assign(app, { symbol, quote, chain: null, chainError: null, hv: null, expiry: null, selected: null, error: null, pending: null, chainLoading: true });
+      Object.assign(app, { symbol, quote, chain: null, chainError: null, hv: null, expiry: null, selected: null, error: null, failed: null, pending: null, chainLoading: true });
       render();
     }
     const [raw, year] = await Promise.all([chainReq, yearReq]);
@@ -163,7 +204,8 @@ async function load(symbol, { quiet = false } = {}) {
     const chain = raw.error || !raw.rows.length ? null : M.buildChain(raw, quote);
     if (year) app.hist[`${symbol}|1Y`] = { at: Date.now(), data: year };
     Object.assign(app, {
-      symbol, quote, chain: chain?.expiries.length ? chain : null, chainError: raw.error || null, loadedAt: Date.now(), error: null, chainLoading: false,
+      symbol, quote, chain: chain?.expiries.length ? chain : null, chainError: raw.error || null, loadedAt: Date.now(),
+      error: null, failed: null, refreshFailed: false, chainLoading: false,
       hv: year ? { d10: Q.realizedVol(year.c, 10), d20: Q.realizedVol(year.c, 20), d60: Q.realizedVol(year.c, 60), d250: Q.realizedVol(year.c, Math.min(250, year.c.length - 1)) } : null,
     });
     pickExpiry(); applyWants(); remember();
@@ -171,6 +213,7 @@ async function load(symbol, { quiet = false } = {}) {
     if (!quiet) ctx.status(`${symbol} loaded`);
   } catch (e) {
     if (token !== loadToken) return;
+    if (symbol === app.symbol) app.refreshFailed = true;                          // the screen keeps its older numbers
     if (!quiet || !app.quote) Object.assign(app, { error: e.message, failed: symbol });
     ctx.status(e.message, true);
   } finally {
@@ -197,8 +240,10 @@ function parseHash() {
   const [, sym = '', view] = path.split('/');
   const q = new URLSearchParams(query);
   let symbol = null;
-  try { symbol = decodeURIComponent(sym).toUpperCase() || null; } catch { /* a mangled address: fall back to the last ticker */ }
-  return { symbol, view: VIEWS.some(v => v.id === view) ? view : null, exp: q.get('exp'), c: q.get('c'), legs: q.get('legs'), lesson: q.get('lesson') };
+  try { symbol = decodeURIComponent(sym).trim().toUpperCase(); } catch { /* a mangled address: fall back to the ticker on screen */ }
+  const id = view?.toLowerCase();
+  return { symbol: isTicker(symbol) ? symbol : null, view: VIEWS.some(v => v.id === id) ? id : null,
+           exp: q.get('exp'), c: q.get('c'), legs: q.get('legs'), lesson: q.get('lesson') };
 }
 function buildHash() {
   const q = new URLSearchParams();
@@ -222,9 +267,9 @@ function navigate(symbol, view) {
   symbol = symbol.toUpperCase();
   if (view) app.view = view;
   app.want = null;
-  if (symbol === app.symbol && !app.pending) { syncUrl(true); render(); return; }
+  if (symbol === app.symbol && !app.pending) { syncUrl(true); render(); return Promise.resolve(); }
   history.pushState(null, '', `#/${encodeURIComponent(symbol)}/${app.view}`);
-  load(symbol);
+  return load(symbol);
 }
 /** The address changed under us: Back, Forward, or an edit in the address bar. */
 function applyUrl() {
@@ -235,7 +280,7 @@ function applyUrl() {
   app.want = { exp: u.exp, c: u.c, legs: u.legs };
   if (u.symbol && u.symbol !== app.symbol) return load(u.symbol);
   app.selected = null;
-  applyWants(); syncUrl(); render();
+  dropOldError(); applyWants(); syncUrl(); render();
 }
 
 // ---------------------------------------------------------------- chrome
@@ -273,6 +318,7 @@ function renderQuote() {
     app.hv?.d20 != null || wait ? block('Realized 20d', wait ? '…' : F.iv(app.hv.d20), 'hv') : null,
     e || wait ? block(e ? `Exp. move ${F.date(e.date)}` : 'Exp. move', e ? `±${F.usd(e.em)} (${F.pct(e.em / e.F)})` : '…', 'em') : null,
     h('button', { class: 'star', key: 'star', tiptext: watched ? 'Remove from the watch strip' : 'Add to the watch strip', onclick: () => {
+      if (!watched && app.watch.length >= MAX_WATCH) return ctx.status(`The watch strip holds ${MAX_WATCH} tickers. Remove one first.`, true);
       app.watch = watched ? app.watch.filter(s => s !== q.symbol) : [...app.watch, q.symbol];
       disk.set('watch', app.watch); keepFocus(() => { renderQuote(); renderWatch(); }); refreshWatch();
     } }, watched ? '★ WATCHING' : '☆ WATCH'));
@@ -297,6 +343,9 @@ function renderStatus() {
     h('span', null, 'Quotes: Yahoo'),
     h('span', { tiptext: 'Free data feeds are delayed by about 15 minutes. Do not use these prices to time an order.' }, '≈15 min delayed'),
     app.loadedAt ? h('span', null, 'Updated ' + F.time(app.loadedAt / 1000) + ' NY') : null,
+    app.refreshFailed ? h('span', { class: 'badge warn', tiptext: 'The latest refresh failed, so the screen still shows what was loaded at the time on the left. Press r to try again; with auto-refresh on it also retries every minute.' }, 'REFRESH FAILED') : null,
+    c && c.pricedAt < Date.now() / 1000 - 1200 ? h('span', { tiptext: 'The market is closed, so option quotes are frozen at the last close. Implied volatility and the Greeks are worked out as of that moment. Days to expiry count from now.' },
+      `Options as of ${F.dateTime(c.pricedAt)} NY`) : null,
     c?.mode === 'last' ? h('span', { class: 'badge warn', tiptext: 'Live quotes are blank (market closed), so prices are last trades.' }, 'LAST-TRADE PRICES') : null,
     fresh ? h('span', { class: m.isError ? 'err' : 'msg' }, m.text) : null,
     h('span', { class: 'sp' }),
@@ -306,7 +355,7 @@ function renderStatus() {
 
 const applyText = () => document.documentElement.style.setProperty('--text', app.text);
 function renderTop() {
-  const sizes = seg([[1, 'A', 'Normal text'], [1.12, 'A', 'Larger text'], [1.25, 'A', 'Largest text']], app.text, size => {
+  const sizes = seg(TEXT_SIZES, app.text, size => {
     app.text = size; disk.set('text', size); applyText();
     keepFocus(() => { renderTop(); render(); });        // charts take their text size when drawn, so draw them again
   }, null, 'Text size');
@@ -323,7 +372,13 @@ function tick() {
   if (el) el.textContent = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: '2-digit', second: '2-digit' }) + ' NY';
 }
 
-const errorBanner = () => h('div', { class: 'banner err' }, app.error, '  ', btn('RETRY', () => load(app.failed || app.symbol), '', 'Try loading it again'));
+/** The banner for a load that failed: the reason, a way to try again and (when there is something else to look at) a way to put it aside. */
+const errorBanner = () => h('div', { class: 'banner err', role: 'alert' }, app.error, '  ',
+  btn('RETRY', () => load(app.failed || app.symbol), '', 'Try loading it again'),
+  app.quote ? h('button', { class: 'btn ghost', key: 'dismiss-error', 'aria-label': 'Dismiss this message', tiptext: 'Dismiss',
+                            onclick: () => { app.error = app.failed = null; renderView(); } }, '✕') : null);
+/** An error about a ticker that never loaded is old news once the user moves on to something else. */
+function dropOldError() { if (app.quote && app.failed !== app.symbol) app.error = app.failed = null; }
 
 function renderView() {
   const root = $('view'), old = document.querySelector('.chain-wrap'), keep = old && [old.scrollTop, old.scrollLeft];
@@ -387,11 +442,29 @@ function initCommand() {
       h('b', null, it.symbol || it.word), h('span', null, it.name), h('i', null, it.kind))));
   };
   const run = it => {
+    const offered = items.map(x => x.symbol);             // what the list was showing when Enter was pressed
     input.value = ''; close(); input.blur();
     if (it.action) return it.action();
     if (!it.symbol) return ctx.go(it.view);
-    ctx.load(it.symbol, it.view);
+    // A suggestion, or a ticker already seen, opens at once. Anything else typed is checked first.
+    const known = !it.typed || recent.has(it.symbol) || app.watch.includes(it.symbol) || offered.includes(it.symbol);
+    return known ? ctx.load(it.symbol, it.view) : openTyped(it);
   };
+  /**
+   * Enter on typed text that is not a known ticker. If it is a real ticker it loads. If not
+   * ("nvidia", "gemini space") it is looked up as a name and the best match opens instead.
+   */
+  const openTyped = async ({ symbol, view, name }) => {
+    ctx.status(`Looking up ${name || symbol}…`);
+    const isReal = !name && isTicker(symbol) && await api('/api/quote?symbol=' + encodeURIComponent(symbol)).then(() => true, () => false);
+    if (isReal) return ctx.load(symbol, view);
+    let hits = [];
+    try { hits = (await api('/api/search?q=' + encodeURIComponent(name || symbol))).results; } catch { /* the plain load below reports the problem */ }
+    const best = hits.find(hit => isTicker(hit.symbol));
+    if (!best) return load(symbol);                       // nothing found: let the normal error say so
+    ctx.load(best.symbol, view);
+  };
+  /** What a typed line means: { action } | { view } | { symbol, view, typed, name: the whole text when it reads as a name, not ticker + view }. */
   const parse = text => {
     const [a, b] = text.trim().toUpperCase().split(/\s+/);
     if (!a) return null;
@@ -399,7 +472,7 @@ function initCommand() {
     if (a === 'GLOSSARY') return { action: showGlossary };
     if (a === 'REFRESH') return { action: () => load(app.symbol) };
     if (WORDS[a] && !b) return { view: WORDS[a] };
-    return { symbol: a, view: b ? CODES[b] : null };
+    return { symbol: a, view: (b && CODES[b]) || null, typed: true, name: b && !CODES[b] ? text.trim() : null };
   };
   // With nothing typed, offer the tickers already in memory: they open instantly.
   const offerRecent = () => {
@@ -455,19 +528,21 @@ function showHelp() {
   const row = (k, v) => [h('dt', null, k), h('dd', null, v)];
   openModal('Help', h('div', null,
     h('dl', { class: 'help' },
-      row('AAPL ⏎', 'Type any ticker or company name in the command line and press Enter. Stocks, ETFs and indexes all work: SPY, QQQ, ^SPX, ^VIX, ^NDX.'),
-      row('SPY CHAIN ⏎', 'Add a view after the ticker to land on it: OVERVIEW (OV), PRICE (GP), CHAIN (OC), VOLATILITY (VOL), OI, STRATEGY (STRAT), CALCULATOR (CALC), LEARN.'),
+      row('AAPL ⏎', 'Type a ticker in the command line and press Enter. Stocks, ETFs and indexes all work: SPY, QQQ, ^SPX, ^VIX, ^NDX. A company name works too (nvidia): pick it from the list, or press Enter to open the best match.'),
+      row('SPY CHAIN ⏎', 'Add a view after the ticker to land on it: OVERVIEW (OV), PRICE (GP), CHAIN (OC), VOLATILITY (VOL), OI, STRATEGY (STRAT), CALCULATOR (CALC), LEARN. A view word on its own (CHAIN) switches view. Open interest needs the ticker first (SPY OI) or the 5 key, because OI alone is a ticker.'),
+      row('HELP  GLOSSARY  REFRESH', 'Typed in the command line: this help, the glossary, or a reload of the ticker.'),
       row('/', 'Jump to the command line. With nothing typed it lists recent tickers, which open instantly. The command bar hides as you scroll down a page and returns when you scroll up or press this key.'),
       row('1 … 8', 'Switch view. The browser\'s Back button steps back through the views and tickers you visited.'),
       row('[  ]', 'Previous and next expiry.'),
-      row('← ↑ ↓ →', 'On the CHAIN view: move between contracts (left for calls, right for puts). Enter opens the one under the cursor. Home and End jump to the lowest and highest strike.'),
+      row('← ↑ ↓ →', 'On the CHAIN view: move between contracts (left for calls, right for puts). Enter or Space opens the one under the cursor, and closes it again. Page Up and Page Down move ten strikes; Home and End jump to the lowest and highest.'),
       row('r', 'Reload the current ticker.'),
       row('g  ?', 'Glossary and this help.'),
       row('Esc', 'Close a dialog or deselect a contract.'),
       row('A A A', 'Text size, top right: normal, larger, largest. Charts follow it.')),
-    h('p', { class: 'note' }, 'The address bar always describes the screen you are on, including the expiry, the selected contract and the legs of a strategy. Bookmark it or copy it to come straight back.'),
-    h('p', { class: 'note' }, 'Hover any dotted-underlined word or column heading for a plain-English definition. Panels with a ? LEARN button open the lesson behind them.'),
-    h('p', { class: 'note' }, 'Data: option chains from Nasdaq\'s public feed for stocks and ETFs, Yahoo Finance for indexes; prices, history and search from Yahoo Finance. Everything is delayed about 15 minutes and comes without any guarantee. Volatility and Greeks are computed here from bid and ask prices.'),
+    h('p', { class: 'note' }, 'The address bar holds the ticker, the view, the expiry, the selected contract, the legs of a strategy and the lesson: bookmark it or copy it to come straight back. Other settings (calculator inputs, chart range, columns, text size) and your watch list, saved positions and lesson progress are remembered by this browser only.'),
+    h('p', { class: 'note' }, 'Hover a column heading or a label for a plain-English definition. Panels with a ? LEARN button open the lesson behind them.'),
+    h('p', { class: 'note' }, 'The screen refreshes every minute while auto-refresh is ticked. It pauses on the Learn, Calculator and Strategy views and while a slider has the focus, so nothing moves under your hands.'),
+    h('p', { class: 'note' }, 'Data: option chains come from Nasdaq\'s public feed, and from Yahoo Finance when Nasdaq has none (most indexes); the status bar names the source. Prices, history and search come from Yahoo Finance. Everything is delayed about 15 minutes and comes without any guarantee. Volatility and Greeks are computed here from bid and ask prices; when the market is closed they are worked out as of the last close.'),
     h('p', { class: 'note small' }, 'This is a learning and analysis tool. Nothing in it is investment advice, and it cannot place orders.')));
 }
 
@@ -475,7 +550,8 @@ function showGlossary() {
   const list = h('dl', { class: 'gloss' });
   const fill = text => mount(list, Object.entries(TERMS).filter(([, t]) => (t.term + t.short + t.long).toLowerCase().includes(text.toLowerCase()))
     .sort((a, b) => a[1].term.localeCompare(b[1].term))
-    .map(([, t]) => [h('dt', null, t.term), h('dd', null, t.long, ' ', t.lesson ? h('a', { href: '#', onclick: ev => { ev.preventDefault(); closeModal(); ctx.openLesson(t.lesson); } }, 'Open the lesson →') : null)]));
+    .map(([, t]) => [h('dt', null, t.term), h('dd', null, h('b', null, t.short), ' ', t.long, ' ',
+      t.lesson ? h('a', { href: '#', onclick: ev => { ev.preventDefault(); closeModal(); ctx.openLesson(t.lesson); } }, 'Open the lesson →') : null)]));
   const search = h('input', { type: 'text', placeholder: 'Search the glossary…', style: { width: '100%' }, oninput: ev => fill(ev.target.value) });
   fill('');
   openModal('Glossary', h('div', null, search, list), { wide: true });
@@ -493,15 +569,17 @@ function start() {
   if (u.view) app.view = u.view;
   if (u.lesson) app.lesson = u.lesson;
   app.want = { exp: u.exp, c: u.c, legs: u.legs };
-  load(u.symbol || disk.get('last', 'SPY'));
+  load(u.symbol || stored('last', 'SPY', isTicker));
   refreshWatch();
   setInterval(tick, 1000);
   setInterval(() => { if (document.visibilityState === 'visible') refreshWatch(); }, 60000);
   // Heartbeat: a server started by the app icon stops itself once no page has spoken to it for a while.
   setInterval(() => { fetch('/api/ping').catch(() => {}); }, 60000);
   setInterval(() => {
-    // Views driven by sliders are left alone so a refresh never yanks a control mid-drag.
-    if (app.autoRefresh && document.visibilityState === 'visible' && app.symbol && !app.loading && !modalOpen() && !['learn', 'calc', 'strategy'].includes(app.view)) load(app.symbol, { quiet: true });
+    // A refresh redraws the view, so it waits while that would pull a control out from under the
+    // user: on the views that are all inputs, with a dialog open, or while a slider has the focus.
+    const busy = ['learn', 'calc', 'strategy'].includes(app.view) || modalOpen() || document.activeElement?.type === 'range';
+    if (app.autoRefresh && document.visibilityState === 'visible' && app.symbol && !app.loading && !busy) load(app.symbol, { quiet: true });
   }, 60000);
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();

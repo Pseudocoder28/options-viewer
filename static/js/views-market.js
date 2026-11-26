@@ -2,7 +2,7 @@
 import * as M from './model.js';
 import * as Q from './quant.js';
 import * as F from './fmt.js';
-import { h, append, mount, plot, chart, panel, stat, table, empty, note, story, seg, check, tone, btn, C, hline, vline, skeletonLines } from './ui.js';
+import { h, append, mount, plot, chart, panel, stat, table, empty, note, story, seg, check, tone, btn, values, C, hline, vline, skeletonLines } from './ui.js';
 import { chainStory } from './explain.js';
 
 
@@ -53,14 +53,14 @@ export function overview(root, ctx) {
   const moves = c.expiries.filter(e => e.em != null && e.days >= 1);
   append(root, panel('Expected move by expiry', { cls: 's5 flush', lesson: ['iv', () => ctx.openLesson('iv')] },
     table([
-      { label: 'Expiry', cls: 'l', cell: e => [F.date(e.date), e.days > 300 ? ` '${e.date.slice(2, 4)}` : ''] },
+      { label: 'Expiry', cls: 'l', cell: e => F.expiryName(e) },
       { label: 'Days', cell: e => F.days(e.days) },
-      { label: 'ATM IV', tip: 'iv', cell: e => h('span', { class: e.smileSrc === 'borrowed' ? 'muted' : '' }, F.iv(e.atmIV)) },
+      { label: 'ATM IV', tip: 'iv', cell: e => h('span', { class: e.smileSrc === 'quotes' ? '' : 'muted' }, F.iv(e.atmIV)) },
       { label: '± Move', tip: 'em', cell: e => F.usd(e.em) },
       { label: '± %', cell: e => F.pct(e.em / e.F) },
-      { label: 'Typical range', cell: e => `${F.price(e.F * Math.exp(-e.atmIV * Math.sqrt(e.T)))} – ${F.price(e.F * Math.exp(e.atmIV * Math.sqrt(e.T)))}` },
+      { label: 'Typical range', cell: e => M.moveRange(e.F, e.atmIV, e.T).map(F.price).join(' – ') },
     ], moves, { onRow: open, rowClass: e => (e.label === app.expiry ? 'on' : '') }),
-    note('One standard deviation: the price ends inside the range about two times in three. Grey volatility figures are borrowed from a neighbouring expiry. Click a row to open that chain.')));
+    note('One standard deviation: the price ends inside the range about two times in three. Grey volatility figures are estimates: borrowed from a neighbouring expiry, or guessed from far-away strikes. Click a row to open that chain.')));
 
   const tag = e => h('span', { class: 'tag' + (e.kind === 'monthly' ? ' m' : '') }, { weekly: 'W', monthly: 'M', quarterly: 'Q', leap: 'LEAP' }[e.kind]);
   append(root, panel('Every expiry at a glance', { cls: 'flush', code: `${c.expiries.length} EXPIRIES · ${F.int(c.contracts.length)} CONTRACTS` },
@@ -69,7 +69,7 @@ export function overview(root, ctx) {
       { label: 'Days', cell: e => F.days(e.days) },
       { label: 'Strikes', cell: e => e.strikes.length },
       { label: 'Quoted', tiptext: 'Contracts showing both a bid and an ask, out of all listed.', cell: e => `${e.stats.quoted}/${e.stats.total}` },
-      { label: 'ATM IV', tip: 'iv', cell: e => h('span', { class: e.smileSrc === 'borrowed' ? 'muted' : '' }, F.iv(e.atmIV)) },
+      { label: 'ATM IV', tip: 'iv', cell: e => h('span', { class: e.smileSrc === 'quotes' ? '' : 'muted' }, F.iv(e.atmIV)) },
       { label: 'Straddle', tiptext: 'Cost of the at-the-money call plus put: roughly what the market charges for a move in either direction.', cell: e => F.price(e.straddle) },
       { label: 'Call vol', cls: 'callc', tip: 'volume', cell: e => F.int(e.stats.callVol) },
       { label: 'Put vol', cls: 'putc', tip: 'volume', cell: e => F.int(e.stats.putVol) },
@@ -84,18 +84,21 @@ export function overview(root, ctx) {
 // ---------------------------------------------------------------- price
 
 const RANGES = ['1D', '5D', '1M', '3M', '6M', 'YTD', '1Y', '2Y', '5Y', 'MAX'];
+const STYLES = [['candles', 'Candles'], ['line', 'Line']];
+let zoom = null;        // the stretch of dates the price chart is zoomed to: { key: 'AAPL|6M', range: [from, to] }. Never saved.
 
 export function price(root, ctx) {
   const { app } = ctx, q = app.quote, sym = q.symbol.replace('^', '');
-  const p = ctx.prefs('price', { range: '6M', type: 'candles', sma20: true, sma50: true, sma200: false, cone: true, walls: false });
+  const p = ctx.prefs('price', { range: '6M', type: 'candles', sma20: true, sma50: true, sma200: false, cone: true, walls: false }, { range: RANGES, type: values(STYLES) });
+  const zoomKey = `${app.symbol}|${p.range}`, zoomed = zoom?.key === zoomKey ? zoom.range : null;
   const set = patch => { Object.assign(p, patch); ctx.savePrefs(); ctx.rerenderView(); };
   const main = chart('xl'), volChart = chart('short'), statsBox = h('div', { class: 'stats' });
   const tick = (key, label, tiptext) => check(label, p[key], v => set({ [key]: v }), tiptext);
-  const reset = h('button', { class: 'btn ghost', hidden: true, key: 'reset-zoom', onclick: () => window.Plotly.relayout(main, { 'xaxis.autorange': true }) }, 'RESET ZOOM');
+  const reset = h('button', { class: 'btn ghost', hidden: !zoomed, key: 'reset-zoom', onclick: () => window.Plotly.relayout(main, { 'xaxis.autorange': true }) }, 'RESET ZOOM');
   append(root,
     h('div', { class: 'toolbar' },
       seg(RANGES, p.range, range => set({ range }), 'Range'),
-      seg([['candles', 'Candles'], ['line', 'Line']], p.type, type => set({ type }), 'Style'),
+      seg(STYLES, p.type, type => set({ type }), 'Style'),
       tick('sma20', 'MA 20', 'Average close of the last 20 bars.'), tick('sma50', 'MA 50', 'Average close of the last 50 bars.'), tick('sma200', 'MA 200', 'Average close of the last 200 bars.'),
       app.chain ? tick('cone', 'Expected-move cone', 'The range option prices imply for each expiry date (one standard deviation). Daily charts only.') : null,
       app.chain ? tick('walls', 'OI walls', 'Strikes holding the most open contracts in the next 60 days.') : null),
@@ -112,7 +115,8 @@ export function price(root, ctx) {
   ctx.history(p.range).then(hist => {
     if (!main.isConnected) return;
     mount(main);
-    drawPrice(main, hist, p, app, zoomed => { reset.hidden = !zoomed; });
+    // The zoom is remembered, so the minute's refresh redraws the same stretch of dates.
+    drawPrice(main, hist, p, app, zoomed, range => { zoom = range && { key: zoomKey, range }; reset.hidden = !range; });
     const s = M.historyStats(hist);
     if (s) mount(statsBox,
       stat('Change', F.signedPct(s.change), { tone: tone(s.change) }), stat('High', F.price(s.high)), stat('Low', F.price(s.low)),
@@ -134,7 +138,8 @@ export function price(root, ctx) {
   } else mount(volChart, app.chainLoading ? skeletonLines(5) : empty('Not enough daily history to measure realized volatility.'));
 }
 
-function drawPrice(el, hist, p, app, onZoom) {
+/** Draw the price chart. zoomed: a [from, to] date range to open on, or null. onZoom(range | null) reports each change of zoom. */
+function drawPrice(el, hist, p, app, zoomed, onZoom) {
   const q = app.quote, chain = app.chain, intraday = /[mh]$/.test(hist.interval), daily = hist.interval === '1d';
   const x = hist.t.map(ts => (intraday ? F.nyStamp(ts) : F.nyStamp(ts).slice(0, 10)));
   const traces = [], shapes = [], notes = [];
@@ -153,18 +158,18 @@ function drawPrice(el, hist, p, app, onZoom) {
     const horizon = Math.max(35, Math.min(span * 0.4, 200));
     const pts = chain.expiries.filter(e => e.atmIV != null && e.days >= 1 && e.days <= horizon);
     if (pts.length) {
-      const band = sign => [spot, ...pts.map(e => e.F * Math.exp(sign * e.atmIV * Math.sqrt(e.T)))];
+      const band = side => [spot, ...pts.map(e => M.moveRange(e.F, e.atmIV, e.T)[side])];      // side 0: the low edge, 1: the high edge
       const cx = [last, ...pts.map(e => e.date)], text = ['now', ...pts.map(e => `${F.date(e.date)} · IV ${F.iv(e.atmIV)}`)];
-      traces.push({ type: 'scatter', mode: 'lines', name: 'cone low', x: cx, y: band(-1), text, line: { color: C.amber, width: 1, dash: 'dot' }, hovertemplate: '%{text}<br>low %{y:,.2f}<extra></extra>' });
+      traces.push({ type: 'scatter', mode: 'lines', name: 'cone low', x: cx, y: band(0), text, line: { color: C.amber, width: 1, dash: 'dot' }, hovertemplate: '%{text}<br>low %{y:,.2f}<extra></extra>' });
       traces.push({ type: 'scatter', mode: 'lines', name: 'Expected range (options)', x: cx, y: band(1), text, line: { color: C.amber, width: 1, dash: 'dot' }, fill: 'tonexty', fillcolor: 'rgba(255,176,0,0.10)',
         hovertemplate: '%{text}<br>high %{y:,.2f}<extra></extra>' });
       const end = pts[pts.length - 1];
       notes.push({ x: end.date, y: band(1)[pts.length], text: `${F.price(band(1)[pts.length])}`, showarrow: false, yanchor: 'bottom', font: { size: 10.5, color: C.amber } },
-                 { x: end.date, y: band(-1)[pts.length], text: `${F.price(band(-1)[pts.length])}`, showarrow: false, yanchor: 'top', font: { size: 10.5, color: C.amber } });
+                 { x: end.date, y: band(0)[pts.length], text: `${F.price(band(0)[pts.length])}`, showarrow: false, yanchor: 'top', font: { size: 10.5, color: C.amber } });
     }
   }
   if (chain && p.walls) {
-    const rows = M.byStrike(chain.expiries.filter(e => e.days <= 60), spot);
+    const rows = M.byStrike(chain.expiries.filter(e => e.days <= 60));
     const top = (key, color, word) => [...rows].sort((a, b) => b[key] - a[key]).slice(0, 2).filter(r => r[key] > 0).forEach(r => {
       const m = hline(r.strike, `${word} ${F.strike(r.strike)} · ${F.compact(r[key])} open`, color, 'dash'); shapes.push(m.shape); notes.push({ ...m.note, x: 0, xanchor: 'left' });
     });
@@ -188,29 +193,34 @@ function drawPrice(el, hist, p, app, onZoom) {
   plot(el, traces, {
     showlegend: traces.length > 2, hovermode: 'x unified', margin: { l: 10, r: 58, t: 26, b: 30 },
     dragmode: 'zoom',        // drag across a stretch of dates to zoom into it; the price scale follows (below)
-    xaxis: { rangeslider: { visible: false }, rangebreaks: breaks, showspikes: true, spikemode: 'across', spikethickness: 1, spikecolor: C.muted, spikedash: 'dot' },
-    yaxis: { side: 'right', domain: [0.2, 1], tickformat: spot < 10 ? ',.2f' : ',.0f', fixedrange: true },
+    xaxis: { rangeslider: { visible: false }, rangebreaks: breaks, showspikes: true, spikemode: 'across', spikethickness: 1, spikecolor: C.muted, spikedash: 'dot',
+             ...(zoomed ? { range: zoomed } : {}) },
+    yaxis: { side: 'right', domain: [0.2, 1], separatethousands: true, fixedrange: true },      // no fixed tick format: a tight zoom needs its decimals
     yaxis2: { domain: [0, 0.15], showticklabels: false, showgrid: false, fixedrange: true },
     shapes, annotations: notes,
   });
-  // After a zoom, fit the price scale to what is in view. Our own relayout comes back through this
-  // event as well, which is why only changes to the date axis count.
-  el.on?.('plotly_relayout', change => {
-    if (!Object.keys(change).some(key => key.startsWith('xaxis.'))) return;
-    const zoomed = el.layout.xaxis.autorange === false;
-    onZoom?.(zoomed);
-    if (!zoomed) return window.Plotly.relayout(el, { 'yaxis.autorange': true });
+  // Fit the price scale to the bars in view. Dates are "YYYY-MM-DD HH:MM" text, which sorts by time.
+  const fitPrices = () => {
     const [from, to] = el.layout.xaxis.range.map(String);
     let lo = Infinity, hi = -Infinity;
     for (const t of el.data) {
       if (t.yaxis === 'y2') continue;                                 // volume keeps its own scale
       t.x.forEach((at, i) => {
-        if (at < from || at > to) return;                             // both are "YYYY-MM-DD HH:MM" text, which sorts by time
+        if (at < from || at > to) return;
         const low = (t.low || t.y)[i], high = (t.high || t.y)[i];
         if (low != null && low < lo) lo = low;
         if (high != null && high > hi) hi = high;
       });
     }
     if (hi > lo) window.Plotly.relayout(el, { 'yaxis.range': [lo - (hi - lo) * 0.06, hi + (hi - lo) * 0.06] });
+  };
+  // A zoom changes the date axis. Our own change to the price axis comes back through this event
+  // too, which is why only changes to the date axis count.
+  el.on?.('plotly_relayout', change => {
+    if (!Object.keys(change).some(key => key.startsWith('xaxis.'))) return;
+    const isZoomed = el.layout.xaxis.autorange === false;
+    onZoom?.(isZoomed ? el.layout.xaxis.range.map(String) : null);
+    if (isZoomed) fitPrices(); else window.Plotly.relayout(el, { 'yaxis.autorange': true });
   });
+  if (zoomed) fitPrices();
 }

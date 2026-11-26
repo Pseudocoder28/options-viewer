@@ -140,9 +140,6 @@ export function initTips() {
   document.addEventListener('focusout', hide);
   document.addEventListener('scroll', hide, true);
 }
-/** A word with a dotted underline that explains itself on hover. */
-export const term = (key, text) => h('span', { class: 'term', tip: key, tabIndex: 0 }, text ?? TERMS[key]?.term ?? key);
-
 // ---------------------------------------------------------------- modal
 
 let modalEl, modalClosed;
@@ -186,12 +183,19 @@ export function slider({ label, min, max, step, value, format = String, onInput,
   el.set = v => { input.value = v; out.textContent = format(+v); };
   return el;
 }
+/** A number box. onChange gets a finite number within min..max (when those are given). */
 export function numberInput({ label, value, step = 'any', min, max, onChange, width, tip, key = label }) {
   const input = h('input', { type: 'number', value, step, min, max, key, style: width ? { width } : null,
-    onchange: e => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) onChange(v); } });
+    onchange: e => {       // a typed value outside min..max is pulled back to the nearest allowed one
+      const v = parseFloat(e.target.value);
+      if (Number.isFinite(v)) onChange(Math.min(Math.max(v, min ?? -Infinity), max ?? Infinity));
+    } });
   return label ? h('label', { class: 'field' }, h('span', { tip }, label), input) : input;
 }
-export const btn = (text, onclick, cls = '', tiptext) => h('button', { class: 'btn ' + cls, onclick, tiptext, key: 'btn:' + text }, text);
+/** A button. key names it for keepFocus; rows of look-alike buttons (one ✕ per leg) must each pass their own. */
+export const btn = (text, onclick, cls = '', tiptext, key = 'btn:' + text) => h('button', { class: 'btn ' + cls, onclick, tiptext, key }, text);
+/** The values of an options list as given to seg() or select(): ['a', ['b', 'Label']] -> ['a', 'b']. */
+export const values = options => options.map(opt => (Array.isArray(opt) ? opt[0] : opt));
 export const check = (label, checked, onChange, tiptext) =>
   h('label', { class: 'check', tiptext }, h('input', { type: 'checkbox', checked, key: 'check:' + label, onchange: e => onChange(e.target.checked) }), label);
 

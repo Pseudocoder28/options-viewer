@@ -9,6 +9,7 @@ the project folder. Standard library only.
 """
 import math
 import plistlib
+import shlex
 import shutil
 import struct
 import subprocess
@@ -22,7 +23,7 @@ APP = ROOT / "Options Terminal.app"
 
 LAUNCHER = r'''#!/bin/zsh
 # Options Terminal launcher, written by make_app.py. Run make_app.py again if the project folder moves.
-PROJECT="__PROJECT__"
+PROJECT=__PROJECT__
 PORT=8765
 URL="http://127.0.0.1:$PORT/"
 LOG="$HOME/Library/Logs/OptionsTerminal.log"
@@ -35,6 +36,8 @@ running() { curl -sf -m 1 -o /dev/null "${URL}api/ping" }
 if ! running; then
   command -v uv >/dev/null || { alert "The uv tool is missing. Install it from https://docs.astral.sh/uv/ and open the app again."; exit 1 }
   cd "$PROJECT" 2>/dev/null || { alert "The project folder has moved. Run make_app.py from its new place to rebuild this app."; exit 1 }
+  # Start the log afresh once it passes about 1 MB, so it never grows without limit.
+  [[ -f "$LOG" && $(stat -f%z "$LOG") -gt 1000000 ]] && : > "$LOG"
   # The server stops by itself 15 minutes after the last browser tab is closed.
   nohup uv run server.py --no-browser --port $PORT --idle-exit 900 >> "$LOG" 2>&1 &!
   for i in {1..120}; do running && break; sleep 0.25; done
@@ -96,7 +99,7 @@ def build():
         "CFBundleExecutable": "launcher", "CFBundleIconFile": "icon",
     }))
     launcher = macos / "launcher"
-    launcher.write_text(LAUNCHER.replace("__PROJECT__", str(ROOT)))
+    launcher.write_text(LAUNCHER.replace("__PROJECT__", shlex.quote(str(ROOT))))     # quoted, so any folder name is safe
     launcher.chmod(0o755)
     try:
         with tempfile.TemporaryDirectory() as tmp:

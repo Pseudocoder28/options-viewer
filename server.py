@@ -40,7 +40,9 @@ import yfinance as yf
 
 STATIC = (Path(__file__).parent / "static").resolve()
 NY = ZoneInfo("America/New_York")
-SYMBOL = re.compile(r"^[A-Z0-9.^=\-]{1,20}$")
+SYMBOL = re.compile(r"[A-Z0-9.^=\-]{1,20}")                      # a ticker as Yahoo writes it; used with fullmatch
+LOCAL_HOSTS = {"127.0.0.1", "localhost"}                          # the only names this server answers to
+CACHE_MAX = 200                                                   # entries kept in memory before the oldest is dropped
 OCC_URL = re.compile(r"([a-z0-9.]+?)-*(\d{6})[cp](\d{8})$")      # tail of a Nasdaq contract link
 OCC_SYM = re.compile(r"^([A-Z0-9.]+?)(\d{6})[CP]\d{8}$")          # Yahoo contract symbol
 NASDAQ_URL = ("https://api.nasdaq.com/api/quote/{sym}/option-chain?assetclass={cls}&limit=50000"
@@ -60,7 +62,8 @@ class ApiError(Exception):
         self.status = status
 
 
-# ponytail: in-memory cache with no eviction. Fine for one person; restart the server to clear it.
+# In-memory cache: key -> (expiry time, value). Expired values are kept so that a failing source
+# can still be answered with the last good data; the oldest entries go once there are CACHE_MAX.
 _cache = {}
 _locks = {}
 _locks_guard = threading.Lock()
@@ -85,7 +88,12 @@ def cached(key, ttl, fn):
             if hit and isinstance(hit[1], dict):
                 return {**hit[1], "stale": True}
             raise
+        _cache.pop(key, None)                    # re-inserting moves the key to the "newest" end
         _cache[key] = (time.time() + ttl, value)
+        while len(_cache) > CACHE_MAX:
+            oldest = next(iter(_cache))
+            del _cache[oldest]
+            _locks.pop(oldest, None)
         return value
 
 
@@ -115,7 +123,10 @@ def http_json(url, timeout=25):
 
 def risk_free_rate():
     def fetch():
-        return {"rate": round(float(yf.Ticker("^IRX").fast_info.last_price) / 100, 5)}  # 13-week T-bill
+        percent = clean(yf.Ticker("^IRX").fast_info.last_price)      # 13-week Treasury bill yield, e.g. 3.6
+        if percent is None:
+            raise ValueError("no Treasury bill yield")
+        return {"rate": round(percent / 100, 5)}
     try:
         return cached("rate", 3600, fetch)["rate"]
     except Exception:
@@ -178,7 +189,7 @@ def get_quotes(symbols):
     def one(symbol):
         def fetch():
             fast = yf.Ticker(symbol).fast_info
-            price, prev = clean(fast.last_price), clean(fast.previous_close)
+            price, prev = clean(fast.last_price, 4), clean(fast.previous_close, 4)
             return {"symbol": symbol, "price": price, "changePct": round((price / prev - 1) * 100, 2) if price and prev else None}
         try:
             return cached(("lite", symbol), 30, fetch)
@@ -217,7 +228,8 @@ def chain_nasdaq(symbol, kind):
     cls = {"EQUITY": "stocks", "ETF": "etf", "INDEX": "index"}.get(kind)
     if not cls:
         return None
-    url = NASDAQ_URL.format(sym=urllib.parse.quote(symbol.lstrip("^")), cls=cls)
+    # Nasdaq writes share classes with a dot (BRK.B) where Yahoo, whose spelling the page uses, has a dash (BRK-B).
+    url = NASDAQ_URL.format(sym=urllib.parse.quote(symbol.lstrip("^").replace("-", ".")), cls=cls)
     table = (http_json(url).get("data") or {}).get("table") or {}
     rows = []
     for r in table.get("rows") or []:
@@ -241,7 +253,10 @@ def chain_yahoo(symbol, kind):
         return None
 
     def one(exp):
-        chain = tk.option_chain(exp)
+        try:
+            chain = tk.option_chain(exp)
+        except Exception:      # Yahoo drops the odd request when asked for dozens of expiries at once: ask once more
+            chain = tk.option_chain(exp)
         rows = []
         for put, frame in ((0, chain.calls), (1, chain.puts)):
             for r in frame.itertuples():
@@ -302,6 +317,10 @@ def get_chain(symbol):
 
 # ---------------------------------------------------------------- http
 
+class Server(ThreadingHTTPServer):
+    request_queue_size = 128      # the default of 5 turns away a burst of connections (a page load opens several at once)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "OptionsTerminal/1.0"
     protocol_version = "HTTP/1.1"
@@ -325,13 +344,30 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_json(self, obj, status=200):
-        self.send_body(json.dumps(obj, separators=(",", ":"), allow_nan=False).encode(), "application/json", status)
+        try:
+            body = json.dumps(obj, separators=(",", ":"), allow_nan=False)
+        except ValueError:     # a NaN or infinity slipped through from a data source: say so rather than drop the connection
+            body, status = json.dumps({"error": "The data source sent a number that cannot be shown. Try again."}), 502
+        self.send_body(body.encode(), "application/json", status)
+
+    def from_this_app(self):
+        """True for a request made by the app's own page, or by a local tool such as curl.
+
+        The server listens on this machine only, but any web page open in the browser can still ask
+        the browser to call it. Two checks keep other sites away from the data endpoints: the Host
+        header must name this machine (a site that points its own domain at 127.0.0.1 fails that),
+        and the browser must not have marked the request as coming from another site.
+        """
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+        return host in LOCAL_HOSTS and self.headers.get("Sec-Fetch-Site", "same-origin") in ("same-origin", "none")
 
     def do_GET(self):
         _last_request[0] = time.time()
         url = urllib.parse.urlsplit(self.path)
         try:
-            if url.path == "/api/ping":         # the page's heartbeat: keeps an idle-exit server alive
+            if url.path.startswith("/api/") and not self.from_this_app():
+                self.send_json({"error": "This server only answers its own page."}, 403)
+            elif url.path == "/api/ping":       # the page's heartbeat: keeps an idle-exit server alive
                 self.send_json({"ok": True})
             elif url.path.startswith("/api/"):
                 self.api(url.path[5:], urllib.parse.parse_qs(url.query))
@@ -346,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def symbol():
             s = arg("symbol").upper()
-            if not SYMBOL.match(s):
+            if not SYMBOL.fullmatch(s):
                 raise ApiError("That does not look like a ticker.", 400)
             return s
         try:
@@ -360,7 +396,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError("Unknown range.", 400)
                 out = get_history(symbol(), rng)
             elif name == "quotes":
-                symbols = [s for s in arg("symbols").upper().split(",") if SYMBOL.match(s)][:40]
+                wanted = [s.strip() for s in arg("symbols").upper().split(",")]
+                symbols = list(dict.fromkeys(s for s in wanted if SYMBOL.fullmatch(s)))[:40]      # valid, no repeats, at most 40
                 out = {"quotes": get_quotes(symbols)}
             elif name == "search":
                 q = arg("q")[:50]
@@ -378,8 +415,12 @@ class Handler(BaseHTTPRequestHandler):
               + (f" error={out['error']}" if status != 200 else ""), file=sys.stderr, flush=True)
 
     def static(self, path):
-        target = (STATIC / ("index.html" if path in ("/", "") else path.removeprefix("/static/").lstrip("/"))).resolve()
-        if STATIC not in target.parents or not target.is_file():
+        try:
+            target = (STATIC / ("index.html" if path in ("/", "") else path.removeprefix("/static/").lstrip("/"))).resolve()
+            found = STATIC in target.parents and target.is_file()       # resolve() first, so ".." cannot climb out of static/
+        except (OSError, ValueError):                                   # a name too long or otherwise impossible for the file system
+            found = False
+        if not found:
             return self.send_body(b"Not found", "text/plain", 404)
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         if target.suffix in (".js", ".mjs"):
@@ -388,7 +429,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _check():
+    """Quick self-test of the parsing rules, run at every start. A failure here stops the server with a traceback."""
     assert clean("--") is None and clean("1,234.5") == 1234.5 and clean(float("nan")) is None and clean("0.30") == 0.3
+    assert SYMBOL.fullmatch("BRK-B") and SYMBOL.fullmatch("^SPX") and not SYMBOL.fullmatch("AA\n") and not SYMBOL.fullmatch("../X")
     m = OCC_URL.search("/market-activity/stocks/gemi/option-chain/call-put-options/gemi--261204c00001500")
     assert m.groups() == ("gemi", "261204", "00001500")
     assert OCC_SYM.match("SPXW261120C07335000").group(1) == "SPXW"
@@ -410,7 +453,7 @@ def main():
                     help="stop after this long without a request (the app launcher uses it, so no server is left running)")
     args = ap.parse_args()
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        httpd = Server(("127.0.0.1", args.port), Handler)
     except OSError as exc:
         sys.exit(f"Could not start on port {args.port}: {exc}. Try --port with another number.")
     url = f"http://127.0.0.1:{args.port}"
