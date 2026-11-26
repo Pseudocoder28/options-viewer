@@ -1,7 +1,7 @@
 // Option chain: expiry strip, the calls | strike | puts table, a heatmap, and the contract explainer.
 import * as M from './model.js';
 import * as F from './fmt.js';
-import { h, append, mount, plot, chart, panel, stat, empty, note, story, seg, select, slider, btn, openModal, C } from './ui.js';
+import { h, append, mount, plot, chart, panel, stat, note, story, seg, select, slider, btn, openModal, C } from './ui.js';
 import { expiryStory, contractStory } from './explain.js';
 import { drawPayoff } from './payoff.js';
 
@@ -32,17 +32,18 @@ const PRESETS = {
 const METRICS = { oi: ['Open interest', c => c.oi, F.compact], vol: ['Volume today', c => c.vol, F.compact], iv: ['Implied volatility', c => (c.sigma == null ? null : c.sigma * 100), v => F.num(v, 0) + '%'],
                   mark: ['Price (mid)', c => c.mark, F.price], spr: ['Spread % of price', c => (c.spreadPct == null ? null : c.spreadPct * 100), v => F.num(v, 0) + '%'] };
 const narrow = () => matchMedia('(max-width: 1150px)').matches;
+let cursor = null;      // id of the contract under the keyboard cursor
 
 export function render(root, ctx) {
-  const { app } = ctx, chain = app.chain, q = app.quote, sym = q.symbol.replace('^', '');
-  if (!chain) return append(root, empty(app.chainError || `No options are listed for ${sym} on the free data sources. Try the PRICE view, or another ticker.`));
+  const { app } = ctx, chain = app.chain, q = app.quote;
+  if (!chain) return append(root, ctx.noChain());
   const p = ctx.prefs('chain', { window: 10, cols: 'basic', unit: 1, mode: 'table', metric: 'oi' });
   const set = patch => { Object.assign(p, patch); ctx.savePrefs(); ctx.rerenderView(); };
   const exp = ctx.expiry() || chain.expiries[0], selected = ctx.contract();
 
   append(root,
     h('div', { class: 'expiries', role: 'tablist', 'aria-label': 'Expiry dates' }, chain.expiries.map(e =>
-      h('button', { class: e === exp ? 'on' : '', onclick: () => ctx.setExpiry(e.label), tiptext: `${F.weekday(e.date)} ${F.dateLong(e.date)} · ${e.strikes.length} strikes` },
+      h('button', { class: e === exp ? 'on' : '', key: 'exp:' + e.label, onclick: () => ctx.setExpiry(e.label), tiptext: `${F.weekday(e.date)} ${F.dateLong(e.date)} · ${e.strikes.length} strikes` },
         h('span', null, F.date(e.date), e.days > 300 ? ` '${e.date.slice(2, 4)}` : '', e.label !== e.date ? ` ${e.root}` : ''),
         h('small', null, `${F.days(e.days)} · ${{ weekly: 'W', monthly: 'M', quarterly: 'Q', leap: 'LEAP' }[e.kind]}${e.atmIV != null ? ' · ' + F.iv(e.atmIV) : ''}`)))),
     h('div', { class: 'toolbar' },
@@ -100,12 +101,50 @@ function tablePanel(exp, chain, q, p, selected, ctx) {
     td.dataset.id = c.id;
     return td;
   };
-  const body = h('tbody', { onclick: ev => {
-    const id = ev.target.closest('td[data-id]')?.dataset.id, c = id && chain.contracts.find(x => x.id === id);
-    if (!c) return;
+  const open = c => {
+    cursor = c.id;
     ctx.select(c);
     if (narrow()) openModal(contractStory(c, chain, q).title, contractDetail(c, ctx), { wide: true });
+  };
+  const body = h('tbody', { onclick: ev => {
+    const id = ev.target.closest('td[data-id]')?.dataset.id, c = id && chain.contracts.find(x => x.id === id);
+    if (c) open(c);
   } });
+
+  // Keyboard: the table is one tab stop. Arrows move a cursor between contracts (up and down through
+  // strikes, left for the call, right for the put), Enter opens the one under it.
+  const at = id => rows.flatMap(r => [r.call, r.put]).find(c => c && c.id === id);
+  if (!at(cursor)) {
+    const start = rows.find(r => r.strike === exp.atmStrike) || rows[0];
+    cursor = (selected && at(selected.id) ? selected : start?.call || start?.put)?.id ?? null;
+  }
+  const paint = (scroll = false) => {
+    body.querySelectorAll('td.cur').forEach(td => td.classList.remove('cur'));
+    body.querySelector('#chain-cursor')?.removeAttribute('id');
+    const c = at(cursor), cells = c ? body.querySelectorAll(`td[data-id="${CSS.escape(c.id)}"]`) : [];
+    cells.forEach(td => td.classList.add('cur'));
+    if (!cells.length) return;
+    cells[0].id = 'chain-cursor';
+    cells[0].setAttribute('aria-label', `${F.contractName(c)}, bid ${c.bid > 0 ? F.price(c.bid) : 'none'}, ask ${c.ask > 0 ? F.price(c.ask) : 'none'}`);
+    if (scroll) cells[0].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  };
+  const move = (by, toSide) => {
+    const cur = at(cursor), side = toSide || (cur?.put ? 'put' : 'call'), step = by < 0 ? -1 : 1;
+    let i = Math.max(rows.findIndex(r => r.strike === (cur ? cur.strike : exp.atmStrike)), 0);
+    i = Math.min(Math.max(i + by, 0), rows.length - 1);
+    while (!rows[i][side] && rows[i + step]) i += step;          // skip strikes that list only the other side
+    const next = rows[i][side] || rows[i].call || rows[i].put;
+    if (next) { cursor = next.id; paint(true); }
+  };
+  const onKey = ev => {
+    const by = { ArrowDown: 1, ArrowUp: -1, PageDown: 10, PageUp: -10, Home: -1e6, End: 1e6 }[ev.key];
+    if (by) move(by);
+    else if (ev.key === 'ArrowLeft') move(0, 'call');
+    else if (ev.key === 'ArrowRight') move(0, 'put');
+    else if ((ev.key === 'Enter' || ev.key === ' ') && at(cursor)) open(at(cursor));
+    else return;
+    ev.preventDefault();
+  };
   let marked = false;
   const marker = () => h('tr', { class: 'spot' }, h('td', { colSpan: callCols.length + putCols.length + 1 },
     `▲ lower strikes     ${sym} ${F.price(chain.spot)}${Math.abs(exp.basis - 1) > 0.005 ? `  ·  option quotes imply ${F.price(exp.S)}` : ''}     higher strikes ▼`));
@@ -114,10 +153,12 @@ function tablePanel(exp, chain, q, p, selected, ctx) {
     body.append(h('tr', null, callCols.map(key => cell(r.call, key, 'c')), h('td', { class: 'k' }, F.strike(r.strike)), putCols.map(key => cell(r.put, key, 'p'))));
   }
   if (!marked) body.append(marker());
+  paint();        // the cursor is always marked; the stylesheet shows it only while the table has focus
   const head = key => h('th', { tip: COLS[key].tip, tiptext: COLS[key].tiptext }, COLS[key].label);
   const hidden = exp.strikes.length - rows.length;
   return panel(`${sym} ${F.dateLong(exp.date)} · ${F.days(exp.days)} to expiry`, { cls: 'flush', code: 'OC' },
-    h('div', { class: 'chain-wrap' }, h('table', { class: 'chain' },
+    h('div', { class: 'chain-wrap', key: 'chain-table', tabIndex: 0, role: 'group', 'aria-activedescendant': 'chain-cursor', onkeydown: onKey,
+               'aria-label': 'Option chain. Arrow keys move between contracts, Enter opens the one under the cursor.' }, h('table', { class: 'chain' },
       h('thead', null,
         h('tr', null, h('th', { class: 'side c', colSpan: callCols.length, tip: 'call' }, 'CALLS'), h('th', { class: 'side', tip: 'strike' }, 'STRIKE'), h('th', { class: 'side p', colSpan: putCols.length, tip: 'put' }, 'PUTS')),
         h('tr', null, callCols.map(head), h('th', null, ''), putCols.map(head))),
@@ -127,6 +168,7 @@ function tablePanel(exp, chain, q, p, selected, ctx) {
       h('span', null, h('i', { style: { borderTop: '2px solid var(--amber)', height: '2px' } }), 'where the price is'),
       h('span', null, h('em', null, 'italic IV'), ' = estimated from neighbouring strikes'),
       h('span', null, 'bars = volume and open interest'),
+      h('span', null, 'keys: ← ↑ ↓ → move between contracts, Enter opens one'),
       h('span', null, k === 100 ? 'figures are per contract (×100)' : 'prices are per share: ×100 for one contract'),
       hidden > 0 ? h('span', { class: 'amber' }, `${hidden} more strikes hidden: choose All`) : null));
 }

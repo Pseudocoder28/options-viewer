@@ -6,6 +6,16 @@ course on the Greeks.
 
 ## Run
 
+On a Mac, build the app once:
+
+    python3 make_app.py
+
+That creates `Options Terminal.app` in this folder. Double-click it, or drag it to the Dock. It
+starts the server if it is not running and opens the terminal in your browser. The server stops by
+itself 15 minutes after the last tab is closed. Rebuild the app if you move this folder.
+
+Or start it from a terminal:
+
     uv run server.py
 
 It opens http://127.0.0.1:8765. You need [uv](https://docs.astral.sh/uv/) and an internet
@@ -15,6 +25,11 @@ connection. Use `--port 9000` for another port and `--no-browser` to skip openin
 
 Type a ticker or company name in the command line at the top (`AAPL`, `SPY`, `^SPX`, `nvidia`).
 Add a view to land on it (`SPY CHAIN`). Keys `1` to `8` switch views and `?` lists the shortcuts.
+
+On the Chain view the arrow keys move between contracts and Enter opens the one under the cursor.
+The browser's Back button steps back through the views and tickers you visited. The address bar
+always describes the screen, including the expiry, the selected contract and the legs of a
+strategy, so any screen can be bookmarked. Recently viewed tickers reopen instantly.
 
 | Key | View | What it shows |
 |---|---|---|
@@ -40,6 +55,7 @@ another source, write a `chain_<name>()` in `server.py` and put it first in `get
 ## Code
 
 - `server.py`: the data server (Python standard library plus `yfinance`)
+- `make_app.py`: builds the double-click macOS launcher
 - `static/js/quant.js`: pricing maths
 - `static/js/model.js`: chain analysis and strategy maths
 - `static/js/views-*.js`: the views

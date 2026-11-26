@@ -5,3 +5,5 @@ __pycache__/
 # local secrets, such as a data-feed key
 .env
 .claude/settings.local.json
+# built by make_app.py
+Options Terminal.app/

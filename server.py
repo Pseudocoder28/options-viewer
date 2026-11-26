@@ -7,6 +7,8 @@
     uv run server.py                 # opens http://127.0.0.1:8765
     uv run server.py --port 9000 --no-browser
 
+On a Mac, `python3 make_app.py` builds a double-click app that runs this for you.
+
 Data sources (free, no key, about 15 minutes delayed):
   option chains   Nasdaq public API: the complete listing for US stocks and ETFs.
                   Yahoo Finance is the fallback: indexes (SPX, VIX, NDX, RUT) and anything Nasdaq lacks.
@@ -60,22 +62,31 @@ class ApiError(Exception):
 
 # ponytail: in-memory cache with no eviction. Fine for one person; restart the server to clear it.
 _cache = {}
+_locks = {}
+_locks_guard = threading.Lock()
+_last_request = [time.time()]      # read by the idle watchdog (see --idle-exit)
 
 
 def cached(key, ttl, fn):
-    """Return a fresh value, or the last good one (marked stale) when the source fails."""
-    now = time.time()
-    hit = _cache.get(key)
-    if hit and hit[0] > now:
-        return hit[1]
-    try:
-        value = fn()
-    except Exception:
-        if hit and isinstance(hit[1], dict):
-            return {**hit[1], "stale": True}
-        raise
-    _cache[key] = (now + ttl, value)
-    return value
+    """Return a fresh value, or the last good one (marked stale) when the source fails.
+
+    Requests for the same key that arrive together wait for one fetch instead of each making
+    their own (the page asks for a quote and a chain at once, and the chain needs the quote).
+    """
+    with _locks_guard:
+        lock = _locks.setdefault(key, threading.Lock())
+    with lock:
+        hit = _cache.get(key)
+        if hit and hit[0] > time.time():
+            return hit[1]
+        try:
+            value = fn()
+        except Exception:
+            if hit and isinstance(hit[1], dict):
+                return {**hit[1], "stale": True}
+            raise
+        _cache[key] = (time.time() + ttl, value)
+        return value
 
 
 def clean(x, digits=None):
@@ -317,9 +328,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_body(json.dumps(obj, separators=(",", ":"), allow_nan=False).encode(), "application/json", status)
 
     def do_GET(self):
+        _last_request[0] = time.time()
         url = urllib.parse.urlsplit(self.path)
         try:
-            if url.path.startswith("/api/"):
+            if url.path == "/api/ping":         # the page's heartbeat: keeps an idle-exit server alive
+                self.send_json({"ok": True})
+            elif url.path.startswith("/api/"):
                 self.api(url.path[5:], urllib.parse.parse_qs(url.query))
             else:
                 self.static(url.path)
@@ -392,6 +406,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8765)))
     ap.add_argument("--no-browser", action="store_true", help="do not open the browser")
+    ap.add_argument("--idle-exit", type=int, default=0, metavar="SECONDS",
+                    help="stop after this long without a request (the app launcher uses it, so no server is left running)")
     args = ap.parse_args()
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
@@ -399,6 +415,15 @@ def main():
         sys.exit(f"Could not start on port {args.port}: {exc}. Try --port with another number.")
     url = f"http://127.0.0.1:{args.port}"
     print(f"Options Terminal running at {url}  (Ctrl+C to stop)", flush=True)
+    # Open the Yahoo session now, so the first ticker does not pay for it.
+    threading.Thread(target=risk_free_rate, daemon=True).start()
+    if args.idle_exit:
+        def watchdog():
+            while time.time() - _last_request[0] < args.idle_exit:
+                time.sleep(5)
+            print(f"No requests for {args.idle_exit} seconds: stopping.", flush=True)
+            httpd.shutdown()
+        threading.Thread(target=watchdog, daemon=True).start()
     if not args.no_browser:
         threading.Timer(0.6, webbrowser.open, [url]).start()
     try:

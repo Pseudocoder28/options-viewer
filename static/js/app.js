@@ -3,7 +3,7 @@
 import * as M from './model.js';
 import * as Q from './quant.js';
 import * as F from './fmt.js';
-import { h, mount, append, initTips, openModal, closeModal, modalOpen, purgePlots, store as disk, btn, tone, check } from './ui.js';
+import { h, mount, append, initTips, openModal, closeModal, modalOpen, purgePlots, store as disk, btn, tone, check, empty, skeleton, keepFocus } from './ui.js';
 import { TERMS } from './glossary.js';
 import { anchorExpiry } from './explain.js';
 import * as market from './views-market.js';
@@ -28,20 +28,27 @@ const WORDS = { OVERVIEW: 'overview', PRICE: 'price', CHAIN: 'chain', VOLATILITY
 const CODES = { ...WORDS, OV: 'overview', DES: 'overview', GP: 'price', CHART: 'price', OC: 'chain', OMON: 'chain', VOL: 'vol', SKEW: 'vol', SURF: 'vol',
                 OI: 'oi', FLOW: 'oi', GEX: 'oi', STRAT: 'strategy', PL: 'strategy', CALC: 'calc', EDU: 'learn' };
 const DEFAULT_WATCH = ['SPY', 'QQQ', 'IWM', '^SPX', '^VIX', 'AAPL', 'NVDA', 'TSLA'];
+const FRESH_MS = 55000;      // a ticker loaded more recently than this is shown without asking the server again
+const KEEP_TICKERS = 6;      // how many recent tickers stay in memory, ready to show at once
 const $ = id => document.getElementById(id);
 
 export const app = {
-  symbol: null, quote: null, chain: null, chainError: null, hv: null, hist: {}, loading: false, error: null, loadedAt: 0,
+  symbol: null, quote: null, chain: null, chainError: null, hv: null, hist: {}, loadedAt: 0, error: null,
+  loading: false,        // a request is in flight (drives the progress bar)
+  pending: null,         // ticker that was asked for but has no data yet (drives the placeholders)
+  chainLoading: false,   // the price is in, the option chain is still on its way
+  want: null,            // { exp, c, legs } from the address bar, applied once the chain is there
   view: 'overview', expiry: null, selected: null,
   ui: disk.get('ui', {}), watch: disk.get('watch', DEFAULT_WATCH), watchQuotes: {},
   legs: disk.get('legs', {}), saved: disk.get('saved', []), lesson: disk.get('lesson', 'basics'), done: disk.get('done', {}),
   autoRefresh: disk.get('auto', true), message: null,
 };
-let loadToken = 0;
+const recent = new Map();     // ticker -> { quote, chain, chainError, hv, loadedAt, expiry }
+let loadToken = 0, rerenderTimer = 0;
 
 async function api(path) {
   let res;
-  try { res = await fetch(path); } catch { throw new Error('Cannot reach the local data server. Is "uv run server.py" still running?'); }
+  try { res = await fetch(path); } catch { throw new Error('Cannot reach the local data server. Open the Options Terminal app again (or run "uv run server.py") to restart it.'); }
   const body = await res.json().catch(() => ({ error: 'The server sent something unreadable.' }));
   if (!res.ok || body.error) throw new Error(body.error || res.statusText);
   return body;
@@ -52,26 +59,28 @@ const ctx = {
   /** Per-view preferences that survive re-renders and reloads. */
   prefs(view, defaults) { app.ui[view] = { ...defaults, ...app.ui[view] }; return app.ui[view]; },
   savePrefs() { disk.set('ui', app.ui); },
-  go(view) { if (app.view !== view) { app.view = view; setHash(); } render(); scrollTo(0, 0); },
-  load: symbol => { location.hash = `#/${encodeURIComponent(symbol.toUpperCase())}/${app.view}`; },
+  /** Switch view. Each switch is a step the Back button can undo. */
+  go(view) { if (app.view !== view) { app.view = view; syncUrl(true); } render(); scrollTo(0, 0); },
+  load: (symbol, view) => navigate(symbol, view),
   render: () => render(),
-  rerenderView: () => renderView(),
+  /** Redraw the view on the next tick, so a Tab or click that caused the change lands first and focus is kept. */
+  rerenderView() { clearTimeout(rerenderTimer); rerenderTimer = setTimeout(renderView, 0); },
   expiry: () => app.chain?.expiries.find(e => e.label === app.expiry) || null,
-  setExpiry(label) { app.expiry = label; app.selected = null; render(); },
+  setExpiry(label) { app.expiry = label; app.selected = null; syncUrl(); render(); },
   contract: () => app.chain?.contracts.find(c => c.id === app.selected) || null,
-  select(c) { app.selected = c ? c.id : null; if (c) app.expiry = c.exp.label; renderView(); },
+  select(c) { app.selected = c ? c.id : null; if (c) app.expiry = c.exp.label; syncUrl(); renderView(); },
   legs: () => app.legs[app.symbol] || [],
-  setLegs(legs) { app.legs[app.symbol] = legs; disk.set('legs', app.legs); },
+  setLegs(legs) { app.legs[app.symbol] = legs; disk.set('legs', app.legs); syncUrl(); },
   addLeg(c, side, qty = 1) { ctx.setLegs([...ctx.legs(), M.legFromContract(c, side, qty)]); ctx.status(`Added to strategy: ${side > 0 ? 'buy' : 'sell'} ${qty} × ${F.contractName(c)}`); },
   saved: () => app.saved,
   setSaved(list) { app.saved = list; disk.set('saved', list); },
   openSaved(s) {
-    app.legs[s.symbol] = s.legs.map(l => ({ ...l })); disk.set('legs', app.legs); app.view = 'strategy';
-    if (s.symbol === app.symbol) { setHash(); render(); } else ctx.load(s.symbol);
+    app.legs[s.symbol] = s.legs.map(l => ({ ...l })); disk.set('legs', app.legs);
+    navigate(s.symbol, 'strategy');
   },
-  openLesson(id) { app.lesson = id; disk.set('lesson', id); ctx.go('learn'); },
+  openLesson(id) { app.lesson = id; disk.set('lesson', id); if (app.view === 'learn') ctx.setLesson(id); else ctx.go('learn'); },
   markDone(id) { app.done[id] = true; disk.set('done', app.done); },
-  setLesson(id) { app.lesson = id; disk.set('lesson', id); renderView(); scrollTo(0, 0); },
+  setLesson(id) { app.lesson = id; disk.set('lesson', id); syncUrl(true); renderView(); scrollTo(0, 0); },
   status(text, isError = false) { app.message = { text, isError, at: Date.now() }; renderStatus(); },
   async history(range) {
     const key = `${app.symbol}|${range}`, hit = app.hist[key];
@@ -81,42 +90,87 @@ const ctx = {
     return data;
   },
   year: () => app.hist[`${app.symbol}|1Y`]?.data || null,
+  /** What a view that needs the chain shows without one: a placeholder while it loads, the reason when there is none. */
+  noChain: () => (app.chainLoading ? skeleton('Loading the option chain…', 8)
+    : empty(app.chainError || `No options are listed for ${app.symbol} on the free data sources (crypto, futures, funds and many foreign shares have none there). The price views still work.`)),
 };
 
 // ---------------------------------------------------------------- loading
 
+/** Put a remembered ticker on screen. */
+function show(symbol, snap) {
+  Object.assign(app, { symbol, quote: snap.quote, chain: snap.chain, chainError: snap.chainError, hv: snap.hv, loadedAt: snap.loadedAt,
+                       expiry: snap.expiry ?? null, selected: null, error: null, pending: null, chainLoading: false });
+  pickExpiry();
+}
+function pickExpiry() {
+  if (app.chain && !ctx.expiry()) app.expiry = (app.chain.expiries.find(e => e.days >= 2) || app.chain.expiries[0]).label;
+}
+function remember() {
+  recent.delete(app.symbol);
+  recent.set(app.symbol, { quote: app.quote, chain: app.chain, chainError: app.chainError, hv: app.hv, loadedAt: app.loadedAt, expiry: app.expiry });
+  while (recent.size > KEEP_TICKERS) recent.delete(recent.keys().next().value);
+}
+/** Apply what the address bar asked for (an expiry, a contract, strategy legs) once the chain is there. */
+function applyWants() {
+  const w = app.want;
+  if (!w || !app.chain) return;
+  app.want = null;
+  const c = w.c && app.chain.contracts.find(x => x.symbol === w.c);
+  if (c) { app.selected = c.id; app.expiry = c.exp.label; }
+  else if (w.exp && app.chain.expiries.some(e => e.label === w.exp)) app.expiry = w.exp;
+  const legs = w.legs ? M.decodeLegs(w.legs, app.chain) : [];
+  if (legs.length) { app.legs[app.symbol] = legs; disk.set('legs', app.legs); }
+}
+
+/**
+ * Load a ticker. A ticker seen in the last few minutes appears at once and is refreshed behind the
+ * scenes. A new one shows placeholders immediately, then its price, then its option chain.
+ */
 async function load(symbol, { quiet = false } = {}) {
   symbol = symbol.toUpperCase();
   const token = ++loadToken;
-  if (!quiet) { app.loading = true; ctx.status(`Loading ${symbol}…`); renderChrome(); }
+  if (symbol !== app.symbol) {
+    const leaving = recent.get(app.symbol);
+    if (leaving) leaving.expiry = app.expiry;
+    const snap = recent.get(symbol);
+    if (snap) {
+      show(symbol, snap); applyWants(); disk.set('last', symbol); syncUrl(); render();
+      if (Date.now() - snap.loadedAt < FRESH_MS) { app.loading = false; return renderChrome(); }
+      quiet = true;
+    } else app.pending = symbol;
+  }
+  app.loading = true;
+  if (!quiet) ctx.status(`Loading ${symbol}…`);
+  if (app.pending) render(); else renderChrome();
+
+  const q = encodeURIComponent(symbol);
+  const chainReq = api('/api/chain?symbol=' + q).catch(e => ({ error: e.message }));
+  const yearReq = api(`/api/history?symbol=${q}&range=1Y`).catch(() => null);
   try {
-    const quote = await api('/api/quote?symbol=' + encodeURIComponent(symbol));
+    const quote = await api('/api/quote?symbol=' + q);
     if (token !== loadToken) return;
-    const changed = app.symbol !== symbol;
-    if (changed) app.hist = {};
-    const [raw, year] = await Promise.all([
-      api('/api/chain?symbol=' + encodeURIComponent(symbol)).catch(e => ({ error: e.message })),
-      api(`/api/history?symbol=${encodeURIComponent(symbol)}&range=1Y`).catch(() => null),
-    ]);
+    if (app.pending) {      // the price is in: show it now, the chain usually lands a moment later
+      Object.assign(app, { symbol, quote, chain: null, chainError: null, hv: null, expiry: null, selected: null, error: null, pending: null, chainLoading: true });
+      render();
+    }
+    const [raw, year] = await Promise.all([chainReq, yearReq]);
     if (token !== loadToken) return;
-    app.symbol = symbol; app.quote = quote; app.error = null; app.loadedAt = Date.now();
-    app.chainError = raw.error || null;
-    app.chain = raw.error || !raw.rows.length ? null : M.buildChain(raw, quote);
-    if (app.chain && !app.chain.expiries.length) app.chain = null;
+    const chain = raw.error || !raw.rows.length ? null : M.buildChain(raw, quote);
     if (year) app.hist[`${symbol}|1Y`] = { at: Date.now(), data: year };
-    app.hv = year ? { d10: Q.realizedVol(year.c, 10), d20: Q.realizedVol(year.c, 20), d60: Q.realizedVol(year.c, 60),
-                      d250: Q.realizedVol(year.c, Math.min(250, year.c.length - 1)) } : null;
-    if (changed) { app.selected = null; app.expiry = null; }
-    if (app.chain && !ctx.expiry()) app.expiry = (app.chain.expiries.find(e => e.days >= 2) || app.chain.expiries[0]).label;
+    Object.assign(app, {
+      symbol, quote, chain: chain?.expiries.length ? chain : null, chainError: raw.error || null, loadedAt: Date.now(), error: null, chainLoading: false,
+      hv: year ? { d10: Q.realizedVol(year.c, 10), d20: Q.realizedVol(year.c, 20), d60: Q.realizedVol(year.c, 60), d250: Q.realizedVol(year.c, Math.min(250, year.c.length - 1)) } : null,
+    });
+    pickExpiry(); applyWants(); remember();
     disk.set('last', symbol);
     if (!quiet) ctx.status(`${symbol} loaded`);
   } catch (e) {
     if (token !== loadToken) return;
     if (!quiet || !app.quote) app.error = e.message;
-    if (app.symbol) setHash();          // keep the address on the ticker that is still showing
     ctx.status(e.message, true);
   } finally {
-    if (token === loadToken) { app.loading = false; render(); }
+    if (token === loadToken) { Object.assign(app, { loading: false, pending: null, chainLoading: false }); syncUrl(); render(); }
   }
 }
 
@@ -130,32 +184,67 @@ async function refreshWatch() {
 }
 
 // ---------------------------------------------------------------- routing
+// The address holds everything needed to come back to a screen:
+//   #/GEMI/chain?c=GEMI261204P00002000      #/SPY/oi?exp=2026-12-18      #/GEMI/strategy?legs=12xGEMI261204P00002000@0.4
+// Changing view, ticker or lesson adds a step for the Back button; refining a screen (expiry, contract, legs) does not.
 
 function parseHash() {
-  const [, sym, view] = location.hash.split('/');
-  return { symbol: sym ? decodeURIComponent(sym).toUpperCase() : null, view: VIEWS.some(v => v.id === view) ? view : null };
+  const [path, query = ''] = location.hash.slice(1).split('?');
+  const [, sym = '', view] = path.split('/');
+  const q = new URLSearchParams(query);
+  let symbol = null;
+  try { symbol = decodeURIComponent(sym).toUpperCase() || null; } catch { /* a mangled address: fall back to the last ticker */ }
+  return { symbol, view: VIEWS.some(v => v.id === view) ? view : null, exp: q.get('exp'), c: q.get('c'), legs: q.get('legs'), lesson: q.get('lesson') };
 }
-function setHash() {
-  const next = `#/${encodeURIComponent(app.symbol || '')}/${app.view}`;
-  if (location.hash !== next) history.replaceState(null, '', next);
+function buildHash() {
+  const q = new URLSearchParams();
+  if (app.chain) {
+    const c = app.view === 'chain' && ctx.contract();
+    if (c) q.set('c', c.symbol);
+    else if (app.expiry && ['chain', 'oi', 'strategy'].includes(app.view)) q.set('exp', app.expiry);
+    if (app.view === 'strategy' && ctx.legs().length) q.set('legs', M.encodeLegs(ctx.legs()));
+  }
+  if (app.view === 'learn') q.set('lesson', app.lesson);
+  const query = q.toString();
+  return `#/${encodeURIComponent(app.symbol || '')}/${app.view}${query ? '?' + query : ''}`;
 }
-function onHash() {
-  const { symbol, view } = parseHash();
+function syncUrl(push = false) {
+  if (!app.symbol) return;
+  const next = buildHash();
+  if (next !== location.hash) history[push ? 'pushState' : 'replaceState'](null, '', next);
+}
+/** Go to a ticker (and optionally a view) as a new step in the history. */
+function navigate(symbol, view) {
+  symbol = symbol.toUpperCase();
   if (view) app.view = view;
-  if (symbol && symbol !== app.symbol) load(symbol);
-  else render();
+  app.want = null;
+  if (symbol === app.symbol && !app.pending) { syncUrl(true); render(); return; }
+  history.pushState(null, '', `#/${encodeURIComponent(symbol)}/${app.view}`);
+  load(symbol);
+}
+/** The address changed under us: Back, Forward, or an edit in the address bar. */
+function applyUrl() {
+  if (location.hash === buildHash()) return;          // the page already shows this address
+  const u = parseHash();
+  if (u.view) app.view = u.view;
+  if (u.lesson) app.lesson = u.lesson;
+  app.want = { exp: u.exp, c: u.c, legs: u.legs };
+  if (u.symbol && u.symbol !== app.symbol) return load(u.symbol);
+  app.selected = null;
+  applyWants(); syncUrl(); render();
 }
 
 // ---------------------------------------------------------------- chrome
 
 function renderTabs() {
-  mount($('tabs'), VIEWS.map((v, i) => h('button', { class: v.id === app.view ? 'on' : '', onclick: () => ctx.go(v.id) }, h('span', { class: 'key' }, i + 1), v.label)));
+  mount($('tabs'), VIEWS.map((v, i) => h('button', { class: v.id === app.view ? 'on' : '', key: 'tab:' + v.id, onclick: () => ctx.go(v.id) }, h('span', { class: 'key' }, i + 1), v.label)));
 }
 
 function renderQuote() {
   const q = app.quote, el = $('quote');
-  if (!q) return mount(el, app.loading ? h('span', { class: 'muted' }, h('span', { class: 'spin' }), ' Loading…') : h('span', { class: 'muted' }, 'No security loaded.'));
-  const c = app.chain, e = c && anchorExpiry(c);
+  if (app.pending) return mount(el, h('span', { class: 'sym' }, app.pending), h('span', { class: 'skel-inline' }), h('span', { class: 'skel-inline short' }), h('span', { class: 'skel-inline short' }));
+  if (!q) return mount(el, h('span', { class: 'muted' }, 'No security loaded.'));
+  const c = app.chain, e = c && anchorExpiry(c), wait = app.chainLoading;
   const state = { REGULAR: ['OPEN', 'open'], PRE: ['PRE-MARKET', 'warn'], POST: ['AFTER HOURS', 'warn'], POSTPOST: ['CLOSED', 'closed'], PREPRE: ['CLOSED', 'closed'], CLOSED: ['CLOSED', 'closed'] }[q.marketState] || [q.marketState || '', 'closed'];
   const block = (label, value, tip) => h('div', { class: 'q' }, h('span', { tip }, label), h('span', null, value));
   const watched = app.watch.includes(q.symbol);
@@ -170,19 +259,21 @@ function renderQuote() {
     block('52-week', `${F.price(q.yearLow)} – ${F.price(q.yearHigh)}`),
     block('Volume', `${F.compact(q.volume)}${q.avgVolume ? ` (${F.num(q.volume / q.avgVolume, 1)}× avg)` : ''}`),
     q.marketCap ? block('Mkt cap', '$' + F.compact(q.marketCap)) : null,
-    c ? block('IV 30d', F.iv(c.iv30), 'iv') : null,
-    app.hv?.d20 != null ? block('Realized 20d', F.iv(app.hv.d20), 'hv') : null,
-    e ? block(`Exp. move ${F.date(e.date)}`, `±${F.usd(e.em)} (${F.pct(e.em / e.F)})`, 'em') : null,
-    h('button', { class: 'star', tiptext: watched ? 'Remove from the watch strip' : 'Add to the watch strip', onclick: () => {
+    // While the chain is on its way these keep their place, so the bar does not jump when it lands.
+    c || wait ? block('IV 30d', c ? F.iv(c.iv30) : '…', 'iv') : null,
+    app.hv?.d20 != null || wait ? block('Realized 20d', wait ? '…' : F.iv(app.hv.d20), 'hv') : null,
+    e || wait ? block(e ? `Exp. move ${F.date(e.date)}` : 'Exp. move', e ? `±${F.usd(e.em)} (${F.pct(e.em / e.F)})` : '…', 'em') : null,
+    h('button', { class: 'star', key: 'star', tiptext: watched ? 'Remove from the watch strip' : 'Add to the watch strip', onclick: () => {
       app.watch = watched ? app.watch.filter(s => s !== q.symbol) : [...app.watch, q.symbol];
-      disk.set('watch', app.watch); renderQuote(); renderWatch(); refreshWatch();
+      disk.set('watch', app.watch); keepFocus(() => { renderQuote(); renderWatch(); }); refreshWatch();
     } }, watched ? '★ WATCHING' : '☆ WATCH'));
 }
 
 function renderWatch() {
+  const current = app.pending || app.symbol;
   mount($('watch'), h('span', { class: 'label' }, 'WATCH'), app.watch.map(sym => {
     const q = app.watchQuotes[sym];
-    return h('button', { class: 'w' + (sym === app.symbol ? ' on' : ''), onclick: () => ctx.load(sym) },
+    return h('button', { class: 'w' + (sym === current ? ' on' : ''), key: 'watch:' + sym, onclick: () => ctx.load(sym) },
       h('b', null, sym.replace('^', '')), h('span', null, q?.price != null ? F.price(q.price) : '…'),
       q?.changePct != null ? h('span', { class: tone(q.changePct) }, F.signedPct(q.changePct / 100, 1)) : null,
       h('span', { class: 'x', tiptext: 'Remove', onclick: ev => { ev.stopPropagation(); app.watch = app.watch.filter(s => s !== sym); disk.set('watch', app.watch); renderWatch(); renderQuote(); } }, '✕'));
@@ -218,22 +309,28 @@ function tick() {
 
 function renderView() {
   const root = $('view'), keep = document.querySelector('.chain-wrap')?.scrollTop;
-  mount(root);
-  if (app.error && !app.quote) append(root, h('div', { class: 'banner err' }, app.error), h('div', { class: 'empty' }, 'Type a ticker in the command line above, for example SPY or AAPL.'));
-  else if (!app.quote) append(root, h('div', { class: 'empty' }, h('span', { class: 'spin' }), ' Loading market data…'));
-  else {
-    if (app.error) append(root, h('div', { class: 'banner err' }, app.error));
-    try { VIEWS.find(v => v.id === app.view).render(root, ctx); } catch (e) {
-      console.error(e);
-      append(root, h('div', { class: 'banner err' }, `This view hit an error: ${e.message}. The other views still work.`));
+  keepFocus(() => {
+    mount(root);
+    if (app.pending) append(root, skeleton(`Loading ${app.pending}…`, 7, 's7'), skeleton('Snapshot', 7, 's5'), skeleton('Price', 5, 's7'), skeleton('Expiries', 5, 's5'));
+    else if (!app.quote) append(root, app.error ? h('div', { class: 'banner err' }, app.error) : null, empty('Type a ticker in the command line above, for example SPY or AAPL.'));
+    else {
+      if (app.error) append(root, h('div', { class: 'banner err' }, app.error));
+      try { VIEWS.find(v => v.id === app.view).render(root, ctx); } catch (e) {
+        console.error(e);
+        append(root, h('div', { class: 'banner err' }, `This view hit an error: ${e.message}. The other views still work.`));
+      }
     }
-  }
+  });
   purgePlots();
   const wrap = document.querySelector('.chain-wrap');
   if (wrap && keep) wrap.scrollTop = keep;
 }
-function renderChrome() { renderTabs(); renderQuote(); renderWatch(); renderStatus(); }
-function render() { document.title = app.symbol ? `${app.symbol.replace('^', '')} ${F.price(app.quote?.price)} · Options Terminal` : 'Options Terminal'; renderChrome(); renderView(); }
+function renderChrome() { $('top').classList.toggle('busy', app.loading); renderTabs(); renderQuote(); renderWatch(); renderStatus(); }
+function render() {
+  document.title = app.pending ? `Loading ${app.pending.replace('^', '')}… · Options Terminal`
+    : app.symbol ? `${app.symbol.replace('^', '')} ${F.price(app.quote?.price)} · Options Terminal` : 'Options Terminal';
+  keepFocus(() => { renderChrome(); renderView(); });
+}
 
 // ---------------------------------------------------------------- command line
 
@@ -248,10 +345,9 @@ function initCommand() {
   };
   const run = it => {
     input.value = ''; close(); input.blur();
-    if (it.view && !it.symbol) return ctx.go(it.view);
     if (it.action) return it.action();
-    if (it.view) app.view = it.view;
-    ctx.load(it.symbol);
+    if (!it.symbol) return ctx.go(it.view);
+    ctx.load(it.symbol, it.view);
   };
   const parse = text => {
     const [a, b] = text.trim().toUpperCase().split(/\s+/);
@@ -262,10 +358,16 @@ function initCommand() {
     if (WORDS[a] && !b) return { view: WORDS[a] };
     return { symbol: a, view: b ? CODES[b] : null };
   };
+  // With nothing typed, offer the tickers already in memory: they open instantly.
+  const offerRecent = () => {
+    items = [...recent.keys()].reverse().filter(s => s !== app.symbol).map(s => ({ symbol: s, name: recent.get(s).quote.name, kind: 'RECENT · opens instantly' }));
+    active = -1; draw();
+  };
+  input.addEventListener('focus', () => { if (!input.value.trim()) offerRecent(); });
   input.addEventListener('input', () => {
     clearTimeout(timer);
     const text = input.value.trim();
-    if (!text) return close();
+    if (!text) { seq++; return offerRecent(); }
     timer = setTimeout(async () => {
       const mine = ++seq, first = text.split(/\s+/)[0];
       const words = Object.entries(WORDS).filter(([w]) => w.startsWith(text.toUpperCase())).map(([w, view]) => ({ word: w, name: 'Switch to this view', kind: 'VIEW', view }));
@@ -289,7 +391,7 @@ function initKeys() {
     if (ev.key === 'Escape' && modalOpen()) return closeModal();
     if (ev.metaKey || ev.ctrlKey || ev.altKey || modalOpen() || /^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName)) return;
     const n = Number(ev.key);
-    if (n >= 1 && n <= VIEWS.length) ctx.go(VIEWS[n - 1].id);
+    if (ev.key !== ' ' && n >= 1 && n <= VIEWS.length) ctx.go(VIEWS[n - 1].id);
     else if (ev.key === '/') { ev.preventDefault(); $('cmd').focus(); }
     else if (ev.key === '?') showHelp();
     else if (ev.key === 'g') showGlossary();
@@ -298,6 +400,10 @@ function initKeys() {
       const list = app.chain.expiries, i = list.findIndex(e => e.label === app.expiry);
       const next = list[Math.min(Math.max(i + (ev.key === ']' ? 1 : -1), 0), list.length - 1)];
       if (next && next.label !== app.expiry) ctx.setExpiry(next.label);
+    } else if (ev.key.startsWith('Arrow') && app.view === 'chain' && !ev.target.closest('.chain-wrap')) {
+      // First arrow press on the chain screen puts the keyboard cursor in the table.
+      const table = document.querySelector('.chain-wrap');
+      if (table) { ev.preventDefault(); table.focus(); }
     } else if (ev.key === 'Escape' && app.selected) ctx.select(null);
   });
 }
@@ -308,12 +414,14 @@ function showHelp() {
     h('dl', { class: 'help' },
       row('AAPL ⏎', 'Type any ticker or company name in the command line and press Enter. Stocks, ETFs and indexes all work: SPY, QQQ, ^SPX, ^VIX, ^NDX.'),
       row('SPY CHAIN ⏎', 'Add a view after the ticker to land on it: OVERVIEW (OV), PRICE (GP), CHAIN (OC), VOLATILITY (VOL), OI, STRATEGY (STRAT), CALCULATOR (CALC), LEARN.'),
-      row('/', 'Jump to the command line.'),
-      row('1 … 8', 'Switch view.'),
+      row('/', 'Jump to the command line. With nothing typed it lists recent tickers, which open instantly.'),
+      row('1 … 8', 'Switch view. The browser\'s Back button steps back through the views and tickers you visited.'),
       row('[  ]', 'Previous and next expiry.'),
+      row('← ↑ ↓ →', 'On the CHAIN view: move between contracts (left for calls, right for puts). Enter opens the one under the cursor. Home and End jump to the lowest and highest strike.'),
       row('r', 'Reload the current ticker.'),
       row('g  ?', 'Glossary and this help.'),
       row('Esc', 'Close a dialog or deselect a contract.')),
+    h('p', { class: 'note' }, 'The address bar always describes the screen you are on, including the expiry, the selected contract and the legs of a strategy. Bookmark it or copy it to come straight back.'),
     h('p', { class: 'note' }, 'Hover any dotted-underlined word or column heading for a plain-English definition. Panels with a ? LEARN button open the lesson behind them.'),
     h('p', { class: 'note' }, 'Data: option chains from Nasdaq\'s public feed for stocks and ETFs, Yahoo Finance for indexes; prices, history and search from Yahoo Finance. Everything is delayed about 15 minutes and comes without any guarantee. Volatility and Greeks are computed here from bid and ask prices.'),
     h('p', { class: 'note small' }, 'This is a learning and analysis tool. Nothing in it is investment advice, and it cannot place orders.')));
@@ -333,17 +441,20 @@ function showGlossary() {
 // ---------------------------------------------------------------- start
 
 function start() {
-  initTips(); initCommand(); initKeys(); renderTop(); renderChrome();
+  initTips(); initCommand(); initKeys(); renderTop();
   $('brand').addEventListener('click', () => ctx.go('overview'));
-  addEventListener('hashchange', onHash);
-  const { symbol, view } = parseHash();
-  if (view) app.view = view;
-  const first = symbol || disk.get('last', 'SPY');
-  if (!symbol) history.replaceState(null, '', `#/${encodeURIComponent(first)}/${app.view}`);
-  load(first);
+  addEventListener('popstate', applyUrl);
+  addEventListener('hashchange', applyUrl);
+  const u = parseHash();
+  if (u.view) app.view = u.view;
+  if (u.lesson) app.lesson = u.lesson;
+  app.want = { exp: u.exp, c: u.c, legs: u.legs };
+  load(u.symbol || disk.get('last', 'SPY'));
   refreshWatch();
   setInterval(tick, 1000);
   setInterval(() => { if (document.visibilityState === 'visible') refreshWatch(); }, 60000);
+  // Heartbeat: a server started by the app icon stops itself once no page has spoken to it for a while.
+  setInterval(() => { fetch('/api/ping').catch(() => {}); }, 60000);
   setInterval(() => {
     // Views driven by sliders are left alone so a refresh never yanks a control mid-drag.
     if (app.autoRefresh && document.visibilityState === 'visible' && app.symbol && !app.loading && !modalOpen() && !['learn', 'calc', 'strategy'].includes(app.view)) load(app.symbol, { quiet: true });

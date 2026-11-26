@@ -260,9 +260,13 @@ export function atDelta(exp, target, put, r) {
 
 /** 25-delta risk reversal: call vol minus put vol. Negative means downside protection costs more. */
 export function riskReversal(exp, r) {
-  if (!exp.smile || exp.smile.length < 3) return null;
-  const c = atDelta(exp, 0.25, false, r), p = atDelta(exp, 0.25, true, r);
-  return c && p ? { call: c, put: p, rr: c.iv - p.iv } : null;
+  // Worked out once per expiry and kept on it: several panels ask, and each answer costs a few
+  // hundred model prices. A refreshed chain is a new set of expiry objects, so nothing goes stale.
+  if (exp.rr === undefined) {
+    const c = exp.smile?.length >= 3 ? atDelta(exp, 0.25, false, r) : null, p = c && atDelta(exp, 0.25, true, r);
+    exp.rr = c && p ? { call: c, put: p, rr: c.iv - p.iv } : null;
+  }
+  return exp.rr;
 }
 
 export function topContracts(chain, score, n = 12) {
@@ -300,6 +304,21 @@ export function legFromContract(c, side, qty = 1, price = null, now = Date.now()
            price: price ?? c.mark ?? c.theo ?? natural ?? 0, bid: c.bid, ask: c.ask, id: c.id, symbol: c.symbol };
 }
 export const stockLeg = (side, shares, price) => ({ kind: 'S', side, qty: shares, price });
+
+/** Legs as short text for the address bar: "12xGEMI261204P00002000@0.4,-1xGEMI261204P00001500@0.05,100S@1.36". */
+export const encodeLegs = legs => legs.map(l => `${l.side < 0 ? '-' : ''}${l.qty}${l.kind === 'S' ? 'S' : 'x' + l.symbol}@${+(+l.price).toFixed(4)}`).join(',');
+/** The reverse. Option legs are matched to live contracts by symbol; any that are no longer listed are dropped. */
+export function decodeLegs(text, chain) {
+  const legs = [];
+  for (const part of String(text).split(',')) {
+    const m = part.match(/^(-?)(\d+)(S|x([A-Z0-9]+))@(\d*\.?\d+)$/);
+    if (!m) continue;
+    const side = m[1] ? -1 : 1, qty = +m[2], price = +m[5];
+    if (m[3] === 'S') legs.push(stockLeg(side, qty, price));
+    else { const c = chain.contracts.find(x => x.symbol === m[4]); if (c) legs.push(legFromContract(c, side, qty, price)); }
+  }
+  return legs;
+}
 export const legMult = leg => (leg.kind === 'S' ? 1 : MULT);
 
 /** Model spot for a leg when the quoted spot is S at time t (applies the fading basis). */

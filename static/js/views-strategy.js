@@ -2,7 +2,7 @@
 import * as M from './model.js';
 import * as Q from './quant.js';
 import * as F from './fmt.js';
-import { h, append, mount, plot, chart, panel, stat, empty, note, seg, select, slider, numberInput, btn, tone, C, vline } from './ui.js';
+import { h, append, mount, plot, chart, panel, stat, note, seg, select, slider, numberInput, btn, tone, C, vline } from './ui.js';
 import { strategyStory, niceMove } from './explain.js';
 import { drawPayoff } from './payoff.js';
 
@@ -30,7 +30,7 @@ function relink(leg, chain, want) {
 
 export function strategy(root, ctx) {
   const { app } = ctx, chain = app.chain, q = app.quote, sym = q.symbol.replace('^', '');
-  if (!chain) return append(root, empty(app.chainError || `No options are listed for ${sym} on the free data sources.`));
+  if (!chain) return append(root, ctx.noChain());
   const now = Date.now() / 1000, exp = ctx.expiry() || chain.expiries[0];
   const legs = ctx.legs().map(l => ({ ...l }));
   syncLegs(legs, chain, now);
@@ -63,12 +63,12 @@ export function strategy(root, ctx) {
     const stock = l.kind === 'S', mult = M.legMult(l);
     const livePnl = l.mark != null ? (l.mark - l.price) * l.side * l.qty * mult : null;
     return h('tr', null,
-      h('td', { class: 'l' }, select([[1, 'Buy'], [-1, 'Sell']], l.side, v => patch(i, { side: +v }))),
-      h('td', null, numberInput({ value: l.qty, min: 1, step: 1, width: '64px', onChange: v => patch(i, { qty: Math.max(Math.round(v), 1) }) })),
-      h('td', { class: 'l' }, select([['C', 'Call'], ['P', 'Put'], ['S', 'Shares']], l.kind, v => commit(legs.map((x, j) => (j !== i ? x : v === 'S' ? M.stockLeg(x.side, 100, chain.spot) : relink({ ...x, expLabel: x.expLabel || exp.label }, chain, { kind: v })))))),
-      h('td', { class: 'l' }, stock ? '—' : select(e ? expOptions : [[l.expLabel, `${F.date(l.date)} (not in chain)`], ...expOptions], l.expLabel, v => commit(legs.map((x, j) => (j === i ? relink(x, chain, { expLabel: v }) : x))))),
-      h('td', null, stock ? '—' : select(strikes.map(s => [s, F.strike(s)]), l.strike, v => commit(legs.map((x, j) => (j === i ? relink(x, chain, { strike: +v }) : x))))),
-      h('td', null, numberInput({ value: +l.price.toFixed(4), min: 0, step: 0.01, width: '82px', onChange: v => patch(i, { price: Math.max(v, 0) }), tip: 'premium' })),
+      h('td', { class: 'l' }, select([[1, 'Buy'], [-1, 'Sell']], l.side, v => patch(i, { side: +v }), null, `leg${i}:side`)),
+      h('td', null, numberInput({ value: l.qty, min: 1, step: 1, width: '64px', key: `leg${i}:qty`, onChange: v => patch(i, { qty: Math.max(Math.round(v), 1) }) })),
+      h('td', { class: 'l' }, select([['C', 'Call'], ['P', 'Put'], ['S', 'Shares']], l.kind, v => commit(legs.map((x, j) => (j !== i ? x : v === 'S' ? M.stockLeg(x.side, 100, chain.spot) : relink({ ...x, expLabel: x.expLabel || exp.label }, chain, { kind: v })))), null, `leg${i}:type`)),
+      h('td', { class: 'l' }, stock ? '—' : select(e ? expOptions : [[l.expLabel, `${F.date(l.date)} (not in chain)`], ...expOptions], l.expLabel, v => commit(legs.map((x, j) => (j === i ? relink(x, chain, { expLabel: v }) : x))), null, `leg${i}:expiry`)),
+      h('td', null, stock ? '—' : select(strikes.map(s => [s, F.strike(s)]), l.strike, v => commit(legs.map((x, j) => (j === i ? relink(x, chain, { strike: +v }) : x))), null, `leg${i}:strike`)),
+      h('td', null, numberInput({ value: +l.price.toFixed(4), min: 0, step: 0.01, width: '82px', key: `leg${i}:entry`, onChange: v => patch(i, { price: Math.max(v, 0) }) })),
       h('td', { class: 'muted' }, stock ? F.price(chain.spot) : l.live ? `${l.bid > 0 ? F.price(l.bid) : '—'} / ${l.ask > 0 ? F.price(l.ask) : '—'}` : 'not quoted'),
       h('td', null, stock ? '—' : F.iv(l.sigma)),
       h('td', null, stock ? F.int(l.side * l.qty) : l.delta != null ? F.int(l.delta * l.side * l.qty * 100) : '—'),

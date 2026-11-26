@@ -12,7 +12,7 @@ export const C = {
 };
 const MONO = 'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace';
 
-/** h('div', { class: 'x', onclick: fn, tip: 'delta' }, 'text', child, [more]) */
+/** h('div', { class: 'x', onclick: fn, tip: 'delta', key: 'name' }, 'text', child, [more]) */
 export function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
@@ -22,6 +22,7 @@ export function h(tag, props, ...kids) {
     else if (k === 'html') el.innerHTML = v;                       // trusted static markup only
     else if (k === 'tip') el.dataset.tip = v;
     else if (k === 'tiptext') el.dataset.tiptext = v;
+    else if (k === 'key') el.dataset.key = v;                       // stable name, so focus survives a re-render (see keepFocus)
     else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else if (k in el) el[k] = v;
     else el.setAttribute(k, v === true ? '' : v);
@@ -69,6 +70,21 @@ export function purgePlots() {
   for (const el of plots) if (!el.isConnected) { window.Plotly?.purge(el); plots.delete(el); }
 }
 export const chart = (cls = '') => h('div', { class: 'chart ' + cls });
+/**
+ * Run draw() only once the chart is about to scroll into view. Heavy charts below the fold (the 3D
+ * surface above all) then cost nothing when a view opens. The chart's box keeps its height meanwhile.
+ */
+export function whenVisible(el, draw) {
+  if (!('IntersectionObserver' in window)) return draw();
+  el.classList.add('pending');
+  const watcher = new IntersectionObserver(entries => {
+    if (!entries.some(e => e.isIntersecting)) return;
+    watcher.disconnect();
+    el.classList.remove('pending');
+    if (el.isConnected) draw();
+  }, { rootMargin: '200px' });
+  watcher.observe(el);
+}
 export const scene3d = title => ({ title: { text: title, font: { size: 11, color: C.muted } }, backgroundcolor: 'rgba(0,0,0,0)',
   gridcolor: '#2a2a27', zerolinecolor: C.axis, linecolor: C.axis, tickfont: { size: 10, color: C.muted }, showbackground: false });
 /** Vertical marker line with a label, as a Plotly shape plus annotation. */
@@ -111,16 +127,21 @@ export const term = (key, text) => h('span', { class: 'term', tip: key, tabIndex
 
 // ---------------------------------------------------------------- modal
 
-let modalEl;
-export function openModal(title, body, { wide = false } = {}) {
+let modalEl, modalClosed;
+export function openModal(title, body, { wide = false, onClose = null } = {}) {
   closeModal();
+  modalClosed = onClose;
   modalEl = h('div', { class: 'modal-back', onclick: e => { if (e.target === modalEl) closeModal(); } },
     h('div', { class: 'modal' + (wide ? ' wide' : ''), role: 'dialog', 'aria-label': title },
       h('div', { class: 'modal-head' }, h('span', null, title), h('button', { class: 'btn ghost', onclick: closeModal, 'aria-label': 'Close' }, 'ESC ✕')),
       h('div', { class: 'modal-body' }, body)));
   document.body.append(modalEl);
 }
-export function closeModal() { modalEl?.remove(); modalEl = null; }
+export function closeModal() {
+  if (!modalEl) return;
+  modalEl.remove(); modalEl = null;
+  modalClosed?.(); modalClosed = null;
+}
 export const modalOpen = () => !!modalEl;
 
 // ---------------------------------------------------------------- controls
@@ -130,12 +151,12 @@ export function seg(options, value, onPick, label) {
   const box = h('div', { class: 'seg', role: 'group', 'aria-label': label });
   for (const opt of options) {
     const [val, text, tiptext] = Array.isArray(opt) ? opt : [opt, opt];
-    box.append(h('button', { class: val === value ? 'on' : '', tiptext, onclick: () => onPick(val) }, text ?? val));
+    box.append(h('button', { class: val === value ? 'on' : '', tiptext, key: `${label ?? 'seg'}:${text ?? val}`, onclick: () => onPick(val) }, text ?? val));
   }
   return label ? h('label', { class: 'field' }, h('span', null, label), box) : box;
 }
-export function select(options, value, onChange, label) {
-  const el = h('select', { onchange: e => onChange(e.target.value) },
+export function select(options, value, onChange, label, key = label) {
+  const el = h('select', { key, onchange: e => onChange(e.target.value) },
     options.map(opt => { const [val, text] = Array.isArray(opt) ? opt : [opt, opt]; return h('option', { value: val, selected: String(val) === String(value) }, text); }));
   return label ? h('label', { class: 'field' }, h('span', null, label), el) : el;
 }
@@ -147,14 +168,14 @@ export function slider({ label, min, max, step, value, format = String, onInput,
   el.set = v => { input.value = v; out.textContent = format(+v); };
   return el;
 }
-export function numberInput({ label, value, step = 'any', min, max, onChange, width, tip }) {
-  const input = h('input', { type: 'number', value, step, min, max, style: width ? { width } : null,
+export function numberInput({ label, value, step = 'any', min, max, onChange, width, tip, key = label }) {
+  const input = h('input', { type: 'number', value, step, min, max, key, style: width ? { width } : null,
     onchange: e => { const v = parseFloat(e.target.value); if (Number.isFinite(v)) onChange(v); } });
   return label ? h('label', { class: 'field' }, h('span', { tip }, label), input) : input;
 }
-export const btn = (text, onclick, cls = '', tiptext) => h('button', { class: 'btn ' + cls, onclick, tiptext }, text);
+export const btn = (text, onclick, cls = '', tiptext) => h('button', { class: 'btn ' + cls, onclick, tiptext, key: 'btn:' + text }, text);
 export const check = (label, checked, onChange, tiptext) =>
-  h('label', { class: 'check', tiptext }, h('input', { type: 'checkbox', checked, onchange: e => onChange(e.target.checked) }), label);
+  h('label', { class: 'check', tiptext }, h('input', { type: 'checkbox', checked, key: 'check:' + label, onchange: e => onChange(e.target.checked) }), label);
 
 /** A titled panel. opts: { code, cls, tools: [nodes], lesson: [id, onOpen] } */
 export function panel(title, opts = {}, ...body) {
@@ -180,8 +201,23 @@ export const note = (...text) => h('p', { class: 'note' }, text);
 export function table(columns, rows, opts = {}) {
   return h('div', { class: 'table-wrap' }, h('table', { class: 'grid ' + (opts.cls || '') },
     h('thead', null, h('tr', null, columns.map(c => h('th', { class: c.cls, tip: c.tip, tiptext: c.tiptext }, c.label)))),
-    h('tbody', null, rows.map(row => h('tr', { class: (opts.rowClass?.(row) || '') + (opts.onRow ? ' click' : ''), onclick: opts.onRow ? () => opts.onRow(row) : null },
+    h('tbody', null, rows.map(row => h('tr', { class: (opts.rowClass?.(row) || '') + (opts.onRow ? ' click' : ''), tabIndex: opts.onRow ? 0 : null,
+      onclick: opts.onRow ? () => opts.onRow(row) : null, onkeydown: opts.onRow ? ev => { if (ev.key === 'Enter') opts.onRow(row); } : null },
       columns.map(c => h('td', { class: c.cls }, c.cell(row))))))));
+}
+
+/** Shimmering bars that hold a panel's place while its data loads. */
+export const skeletonLines = (n = 6) => h('div', { class: 'skel', 'aria-hidden': 'true' }, Array.from({ length: n }, () => h('i')));
+export const skeleton = (title, n = 6, cls = '') => h('section', { class: 'panel ' + cls, 'aria-busy': 'true' }, h('header', null, h('h2', null, title)), skeletonLines(n));
+
+/**
+ * Run fn (which rebuilds part of the page) and put keyboard focus back on the same control.
+ * Controls are matched by data-key, so anything a user can tab to and that triggers a re-render carries one.
+ */
+export function keepFocus(fn) {
+  const key = document.activeElement?.dataset?.key;
+  fn();
+  if (key && document.activeElement?.dataset?.key !== key) document.querySelector(`[data-key="${CSS.escape(key)}"]`)?.focus({ preventScroll: true });
 }
 
 const KEY = 'optionsTerminal.';

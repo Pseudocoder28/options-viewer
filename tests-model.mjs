@@ -112,6 +112,13 @@ export async function run(M, test, close) {
         const a = M.analysePosition(legs, { S: quote.price, r: chain.rate, now: Date.now() / 1000, vol: e.atmIV });
         assert.ok(Number.isFinite(a.cost) && a.pop >= 0 && a.pop <= 1.000001, `${name}: cost ${a.cost} pop ${a.pop}`);
       }
+      const condor = M.buildTemplate('Iron condor', e, quote.price).map((l, i) => ({ ...l, qty: i + 1, price: +(l.price + 0.01 * i).toFixed(4) }));
+      const withShares = [M.stockLeg(1, 100, 712.34), ...condor];
+      const back = M.decodeLegs(M.encodeLegs(withShares), chain);
+      assert.equal(back.length, withShares.length, 'every leg survives the trip through the address bar');
+      back.forEach((l, i) => { for (const k of ['kind', 'side', 'qty', 'strike', 'close', 'price']) assert.equal(l[k], withShares[i][k], `leg ${i} ${k}`); });
+      assert.deepEqual(M.decodeLegs('3xNOPE999999C00001000@1,garbage,-2S@5', chain).map(l => [l.kind, l.side, l.qty, l.price]), [['S', -1, 2, 5]], 'unknown contracts and junk are dropped');
+      assert.equal(M.riskReversal(e, chain.rate), M.riskReversal(e, chain.rate), 'the skew reading is computed once per expiry');
       const rr = M.riskReversal(e, chain.rate);
       assert.ok(rr && rr.put.strike < e.F && rr.call.strike > e.F, '25-delta strikes straddle the forward');
       console.log(`      ${e.label}: atm ${(e.atmIV * 100).toFixed(1)}%  25d put ${(rr.put.iv * 100).toFixed(1)}%  25d call ${(rr.call.iv * 100).toFixed(1)}%  median call/put gap ${(Q.median(diffs) * 100).toFixed(2)} pts`);

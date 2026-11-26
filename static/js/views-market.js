@@ -2,10 +2,9 @@
 import * as M from './model.js';
 import * as Q from './quant.js';
 import * as F from './fmt.js';
-import { h, append, mount, plot, chart, panel, stat, table, empty, note, story, seg, check, tone, C, hline, vline } from './ui.js';
+import { h, append, mount, plot, chart, panel, stat, table, empty, note, story, seg, check, tone, C, hline, vline, skeletonLines } from './ui.js';
 import { chainStory } from './explain.js';
 
-const NO_OPTIONS = sym => `No options are listed for ${sym} on the free data sources (crypto, futures, funds and many foreign shares have none there). The price views still work.`;
 
 // ---------------------------------------------------------------- overview
 
@@ -35,7 +34,7 @@ export function overview(root, ctx) {
   const priceChart = chart('short');
   append(root,
     panel('What the options market is saying', { cls: 's7', code: 'OV', lesson: ['iv', () => ctx.openLesson('iv')] },
-      c ? story(chainStory(c, q, app.hv)) : empty(app.chainError || NO_OPTIONS(sym))),
+      c ? story(chainStory(c, q, app.hv)) : ctx.noChain()),
     panel('Snapshot', { cls: 's5 flush' }, stats),
     panel(`${sym} price, one year`, { cls: 's7', tools: h('button', { class: 'btn ghost', onclick: () => ctx.go('price') }, 'FULL CHART →') }, priceChart));
 
@@ -47,7 +46,7 @@ export function overview(root, ctx) {
       hovertemplate: '%{x|%b %d, %Y}<br>close %{y:,.2f}<extra></extra>' }],
       { margin: { l: 10, r: 54, t: 8, b: 26 }, yaxis: { side: 'right', range: [Math.min(...year.l) * 0.97, Math.max(...year.h) * 1.03] }, hovermode: 'x',
         shapes: marks.map(m => m.shape), annotations: marks.map(m => m.note) });
-  } else mount(priceChart, empty('No price history available.'));
+  } else mount(priceChart, app.chainLoading ? skeletonLines(5) : empty('No price history available.'));
 
   if (!c) return;
   const open = e => { ctx.app.expiry = e.label; ctx.app.selected = null; ctx.go('chain'); };
@@ -131,7 +130,7 @@ export function price(root, ctx) {
     plot(volChart, [line(20, C.series[2], 'Realized, last 20 days'), line(60, C.series[4], 'Realized, last 60 days')],
       { showlegend: true, hovermode: 'x unified', yaxis: { ticksuffix: '%', rangemode: 'tozero' }, margin: { t: 26 },
         shapes: marks.map(m => m.shape), annotations: marks.map(m => m.note) });
-  } else mount(volChart, empty('Not enough daily history to measure realized volatility.'));
+  } else mount(volChart, app.chainLoading ? skeletonLines(5) : empty('Not enough daily history to measure realized volatility.'));
 }
 
 function drawPrice(el, hist, p, app) {
