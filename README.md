@@ -16,7 +16,7 @@ No account. No API key. No build step.
 ![Platform](https://img.shields.io/badge/macOS%20app-included-000000?logo=apple&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[Quick start](#-quick-start) · [Features](#-features) · [Screenshots](#-tour) · [How it works](#-how-it-works) · [Tests](#-tests)
+[New to options?](#-new-to-options-start-here) · [Quick start](#-quick-start) · [Features](#-features) · [Screenshots](#-tour) · [How it works](#-how-it-works) · [Tests](#-tests)
 
 <br/>
 
@@ -25,6 +25,24 @@ No account. No API key. No build step.
 <sub>Type a ticker, then press <kbd>1</kbd>–<kbd>8</kbd> to step through the views. · <a href="docs/demo.mp4">Full-quality video (MP4)</a></sub>
 
 </div>
+
+---
+
+## 💡 New to options? Start here
+
+**What's an option?** It's like paying a small deposit to hold a price. Say you pay a seller $5k for the right to
+buy a $500k house at that price any time in the next 3 months. If prices jump to $600k, your deal is worth a lot. If
+prices fall, you walk away and lose only the $5k. Stock options work the same way, but for shares of companies like Apple.
+
+- **Call**: a bet that the price goes up.
+- **Put**: a bet that the price goes down, or insurance against a fall.
+
+**What does this app do?** For any company, thousands of options trade at different prices and end dates. That's a
+wall of numbers. Options Terminal pulls that data for free and turns it into charts and plain-English summaries.
+You can see what traders expect a stock to do, how nervous they are, and where the big bets sit. You can also test
+a trade to see your profit or loss before risking real money, and learn the basics in built-in lessons.
+
+> **In one line:** a free, simple version of the expensive terminals professional traders use, and it explains what it shows in plain English.
 
 ---
 
