@@ -7,3 +7,5 @@ __pycache__/
 .claude/settings.local.json
 # built by make_app.py
 Options Terminal.app/
+# local editor and agent settings
+.claude/

@@ -1,169 +1,272 @@
-# Options Terminal
+<div align="center">
 
-A local, terminal-style web app for options. Load any US stock, ETF or index and get its option
-chain, volatility, open interest, a strategy builder, a pricing calculator and an interactive
-course on the Greeks. It runs on your own machine and needs no account or API key.
+# 📈 Options Terminal
 
-## What you need
+**A Bloomberg-style options analysis terminal that runs on your own machine.**
+Load any US stock, ETF or index and get its full option chain, volatility skew and surface, open interest,
+a multi-leg strategy builder, a pricing calculator and an interactive course on the Greeks.
 
-- [uv](https://docs.astral.sh/uv/). Both ways of starting the app use it. On the first run it
-  fetches Python and the one library the server needs (`yfinance`) by itself.
-- An internet connection: for the market data, and for the chart library (Plotly), which the page
-  loads from a CDN.
-- Node 18 or newer, only if you want to run the tests.
+No account. No API key. No build step.
 
-## Start it
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![JavaScript](https://img.shields.io/badge/JavaScript-ES%20modules-F7DF1E?logo=javascript&logoColor=black)
+![Plotly](https://img.shields.io/badge/Charts-Plotly-3F4F75?logo=plotly&logoColor=white)
+![uv](https://img.shields.io/badge/run%20with-uv-DE5FE9)
+![Tests](https://img.shields.io/badge/tests-24%20passing-2ea44f)
+![Platform](https://img.shields.io/badge/macOS%20app-included-000000?logo=apple&logoColor=white)
 
-On a Mac, build the app icon once:
+[Quick start](#-quick-start) · [Features](#-features) · [Screenshots](#-tour) · [How it works](#-how-it-works) · [Tests](#-tests)
 
-    python3 make_app.py
+<br/>
 
-That creates `Options Terminal.app` in this folder. Double-click it, or drag it to the Dock. It
-starts the server if it is not running and opens the terminal in your browser. The server stops by
-itself 15 minutes after the last tab is closed. Build the app again if you move this folder.
+<img src="docs/demo.gif" alt="Demo: typing AAPL and stepping through every view of Options Terminal" width="100%"/>
 
-Or start it from a terminal:
+<sub>Type a ticker, then press <kbd>1</kbd>–<kbd>8</kbd> to step through the views. · <a href="docs/demo.mp4">Full-quality video (MP4)</a></sub>
 
-    uv run server.py
+</div>
 
-It opens http://127.0.0.1:8765. Use `--port 9000` for another port and `--no-browser` to skip
-opening the browser. Stop it with Ctrl+C.
+---
 
-## Find your way around
+## ✨ Features
 
-Type a ticker in the command line at the top and press Enter (`AAPL`, `SPY`, `^SPX`). A company
-name works too (`nvidia`): pick it from the list, or press Enter to open the best match. Add a
-view after the ticker to land on it (`SPY CHAIN`).
-
-| Key | View | What it shows |
-|---|---|---|
-| 1 | Overview | A plain-English reading of the whole chain, and every expiry at a glance |
-| 2 | Price | Candles, moving averages and the range options imply for each expiry |
-| 3 | Chain | Calls, strikes and puts; click a contract for an explanation and what-if sliders |
-| 4 | Volatility | Skew by strike, term structure and a 3D surface |
-| 5 | Open interest | Positions and volume by strike, max pain, estimated dealer gamma |
-| 6 | Strategy | Multi-leg positions with payoff, break-evens, odds and net Greeks |
-| 7 | Calculator | Price any option, solve for implied volatility |
-| 8 | Learn | Thirteen lessons with live examples, sliders and quizzes |
-
-Other keys: `/` jumps to the command line, `[` and `]` step through expiries, `r` reloads, `g`
-opens the glossary and `?` lists every shortcut. On the Chain view the arrow keys move between
-contracts and Enter opens the one under the cursor.
-
-A few things worth knowing:
-
-- **The address bar is a bookmark.** It holds the ticker, the view, the expiry, the selected
-  contract, the legs of a strategy and the lesson. The browser's Back button steps back through
-  the views and tickers you visited.
-- **Everything else is remembered by this browser only**: your watch list, strategy legs, saved
-  positions, lesson progress, calculator inputs, chart range and text size. Another browser, or
-  clearing site data, starts empty.
-- **The screen refreshes every minute** while auto-refresh is ticked. It pauses on the Learn,
-  Calculator and Strategy views and while a slider has the focus.
-- **Estimates are marked.** A volatility in italics is read off the curve rather than taken from
-  that contract's own quote. Grey figures are borrowed from a neighbouring expiry or guessed from
-  far-away strikes.
-- The command bar hides while you scroll down and returns when you scroll up. The `A A A` buttons
-  set the text size. On the Price view, drag across the chart to zoom into a stretch of dates.
-
-## Where the numbers come from
-
-Free sources, no key, about 15 minutes delayed:
-
-- **Option chains**: Nasdaq's public feed first (the complete listing for stocks and ETFs), and
-  Yahoo Finance when Nasdaq has none (most indexes). The status bar names the source in use.
-- **Quotes, price history, ticker search and the risk-free rate**: Yahoo Finance, through
-  `yfinance`.
-
-Implied volatility and the Greeks are not downloaded. The browser computes them from bid and ask
-prices with the Black-Scholes-Merton model. The limits of that are worth knowing:
-
-- **Delayed prices.** Never time an order from this screen. Check your broker's live quote.
-- **Closed market.** Quotes freeze at the close, so volatility and Greeks are worked out as of the
-  close. The status bar says "Options as of ..." when that is the case.
-- **Early exercise.** The model treats every option as exercisable only at expiry. Stock options
-  can be exercised early, so deep in-the-money puts are worth a little more than shown. The
-  Calculator's Binomial model shows the difference.
-- **Thin chains.** With few usable quotes the inputs are rough and so are the outputs. The app
-  says so instead of hiding it.
-- **Chance of profit** assumes one bell-shaped spread of prices at the at-the-money volatility of
-  the first expiry. It ignores skew, costs and selling early.
-
-## How it works
-
-    browser (static/)                          server.py                    the internet
-    -----------------                          ---------                    ------------
-    app.js    load("AAPL")  -- /api/quote   -->  get_quote    -- yfinance -->  Yahoo Finance
-                            -- /api/chain   -->  get_chain    -- HTTPS    -->  Nasdaq, then Yahoo
-                            -- /api/history -->  get_history  -- yfinance -->  Yahoo Finance
-    model.js  buildChain(raw, quote)    turns the raw rows into expiries and contracts with
-                                        implied volatility, Greeks and statistics
-    views-*.js  render(root, ctx)       draws the current view from that model
-
-The server only fetches, caches and repackages data. Every calculation happens in the browser,
-in plain JavaScript modules with no build step: edit a file and reload the page.
-
-The server listens on this machine only (127.0.0.1) and refuses requests that do not come from
-its own page, so other web sites cannot use it.
-
-## The code, file by file
-
-Start with `static/js/app.js`, then `model.js`, then any one view.
-
-| File | What is in it |
+| | |
 |---|---|
-| `server.py` | The data server: endpoints, the two chain sources, the cache. Standard library plus `yfinance` |
-| `make_app.py` | Builds the double-click macOS launcher |
-| `static/index.html`, `static/app.css` | The page shell and every style |
-| `static/js/app.js` | State, loading, the address bar, the command line, keys, the list of views |
-| `static/js/model.js` | The chain model (its data shapes are listed at the top) and strategy maths |
-| `static/js/quant.js` | Pricing maths. The units of every number are listed at the top |
-| `static/js/explain.js` | The plain-English readings |
-| `static/js/views-market.js` | Overview and Price views |
-| `static/js/views-chain.js` | Chain view and the contract panel |
-| `static/js/views-vol.js` | Volatility and Open interest views |
-| `static/js/views-strategy.js` | Strategy builder and Calculator |
-| `static/js/learn.js`, `learn-widgets.js` | The course: lesson text, and its interactive widgets |
-| `static/js/glossary.js` | Every hover tip and glossary entry |
-| `static/js/expiries.js`, `payoff.js` | The expiry picker and the profit-and-loss chart, shared by several views |
-| `static/js/ui.js`, `fmt.js` | Page and chart helpers; number and date formatting |
-| `tests.mjs`, `tests-model.mjs` | The checks (see below) |
+| 🧭 **Plain-English overview** | Reads the whole chain for you: expected move, volatility vs. history, skew, term structure, positioning, liquidity |
+| 🔗 **Full option chain** | Calls and puts by strike with IV and Greeks; table or heatmap; click any contract for an explanation and what-if sliders |
+| 🌋 **Volatility** | Skew by strike across expiries, term structure, and a rotatable 3D volatility surface |
+| 🧱 **Open interest & flow** | OI and volume by strike, max pain, and estimated dealer gamma exposure |
+| 🧮 **Strategy builder** | 14 templates (spreads, straddles, iron condor, butterfly, covered call, collar…) with payoff chart, break-evens, chance of profit and net Greeks |
+| 🧪 **Pricing calculator** | Black-Scholes and Binomial (American) models, implied-volatility solver, first- and second-order Greeks |
+| 🎓 **Learn** | 13 interactive lessons on options and the Greeks, built on live data, with sliders and quizzes |
+| ⌨️ **Keyboard-first** | Command line for tickers and views, number keys for views, arrow-key navigation through the chain |
+| 🔖 **Every screen is a link** | Ticker, view, expiry, selected contract and strategy legs all live in the URL; Back works as expected |
+| 🔒 **Local and private** | The server binds to `127.0.0.1` and only answers its own page. Your watchlist and positions stay in your browser |
 
-To change things:
+**By the numbers:** ~5,300 lines of code · 8 views · 13 lessons · 14 strategy templates · 24 automated checks ·
+1 Python dependency (`yfinance`) · 0 build tools
+
+---
+
+## 🚀 Quick start
+
+**You need:** [uv](https://docs.astral.sh/uv/) (it fetches Python and `yfinance` on the first run) and an internet connection.
+Node 18+ is only needed to run the tests.
+
+```bash
+git clone https://github.com/Pseudocoder28/options-viewer.git
+cd options-viewer
+uv run server.py
+```
+
+That opens **http://127.0.0.1:8765**. Use `--port 9000` for another port, or `--no-browser` to skip opening a tab.
+
+### 🍎 macOS app (optional)
+
+```bash
+python3 make_app.py
+```
+
+This builds **`Options Terminal.app`** in the project folder. Double-click it or drag it to the Dock. It starts the
+server if needed, opens the terminal, and shuts the server down 15 minutes after the last tab closes.
+Rebuild it if you move the folder.
+
+---
+
+## 🖼️ Tour
+
+<table>
+<tr>
+<td width="50%"><b>1 · Overview</b>: the chain explained in plain English<br/><img src="docs/screenshots/overview.png" alt="Overview view"/></td>
+<td width="50%"><b>2 · Price</b>: candles, moving averages and the option-implied range<br/><img src="docs/screenshots/price.png" alt="Price view"/></td>
+</tr>
+<tr>
+<td><b>3 · Chain</b>: calls, strikes, puts, IV, delta and a plain-English panel<br/><img src="docs/screenshots/chain.png" alt="Chain view"/></td>
+<td><b>4 · Volatility</b>: skew across expiries, term structure, 3D surface<br/><img src="docs/screenshots/volatility.png" alt="Volatility view"/></td>
+</tr>
+<tr>
+<td><b>5 · Open interest</b>: positioning, volume, max pain, dealer gamma<br/><img src="docs/screenshots/open-interest.png" alt="Open interest view"/></td>
+<td><b>6 · Strategy</b>: an iron condor with payoff, odds and net Greeks<br/><img src="docs/screenshots/strategy.png" alt="Strategy builder"/></td>
+</tr>
+<tr>
+<td><b>7 · Calculator</b>: price any option and solve for implied volatility<br/><img src="docs/screenshots/calculator.png" alt="Calculator view"/></td>
+<td><b>8 · Learn</b>: interactive lessons with live examples<br/><img src="docs/screenshots/learn.png" alt="Learn view"/></td>
+</tr>
+</table>
+
+---
+
+## ⌨️ Using it
+
+Type a ticker in the command line and press <kbd>Enter</kbd> (`AAPL`, `SPY`, `^SPX`). Company names work too (`nvidia`).
+Add a view after the ticker to jump straight to it: `SPY CHAIN`, `TSLA VOL`, `QQQ STRAT`.
+
+| Key | Action | | Key | Action |
+|:---:|---|---|:---:|---|
+| <kbd>1</kbd> | Overview | | <kbd>/</kbd> | Jump to the command line |
+| <kbd>2</kbd> | Price | | <kbd>[</kbd> <kbd>]</kbd> | Previous / next expiry |
+| <kbd>3</kbd> | Chain | | <kbd>r</kbd> | Reload data |
+| <kbd>4</kbd> | Volatility | | <kbd>g</kbd> | Glossary |
+| <kbd>5</kbd> | Open interest | | <kbd>?</kbd> | List every shortcut |
+| <kbd>6</kbd> | Strategy | | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd> | Move through the chain |
+| <kbd>7</kbd> | Calculator | | <kbd>Enter</kbd> | Open the contract under the cursor |
+| <kbd>8</kbd> | Learn | | <kbd>Esc</kbd> | Close the contract panel |
+
+<details>
+<summary><b>Good to know</b></summary>
+
+- **The address bar is a bookmark.** It stores the ticker, view, expiry, selected contract, strategy legs and lesson.
+- **Your browser remembers the rest**: watchlist, strategy legs, saved positions, lesson progress, calculator inputs,
+  chart range and text size. A different browser, or cleared site data, starts empty.
+- **Auto-refresh runs every minute.** It pauses on Learn, Calculator and Strategy, and while a slider is in use.
+- **Estimates are marked.** An IV in *italics* is read off the curve rather than from that contract's own quote.
+  Grey figures are borrowed from a neighbouring expiry or extrapolated from far strikes.
+- The command bar tucks away as you scroll down. <kbd>A</kbd> <kbd>A</kbd> <kbd>A</kbd> sets the text size.
+  On the Price view, drag across the chart to zoom into a date range; double-click to reset.
+
+</details>
+
+---
+
+## 📡 Where the data comes from
+
+All sources are free and need no key. Data is **about 15 minutes delayed**.
+
+| Data | Source |
+|---|---|
+| Option chains | **Nasdaq** public feed (full listing for stocks and ETFs), falling back to **Yahoo Finance** (most indexes: SPX, VIX, NDX, RUT) |
+| Quotes, price history, ticker search, risk-free rate | **Yahoo Finance** via `yfinance` |
+| Implied volatility and Greeks | **Computed in your browser** from bid/ask with Black-Scholes-Merton |
+
+<details>
+<summary><b>Limits of the model</b></summary>
+
+- **Delayed prices.** Never time an order from this screen; check your broker's live quote.
+- **Closed market.** Quotes freeze at the close, so IV and Greeks are computed as of the close
+  (the status bar says *"Options as of …"*).
+- **Early exercise.** The main model assumes European exercise. Deep in-the-money American puts are worth a little
+  more; the Calculator's Binomial model shows the difference.
+- **Thin chains.** Few usable quotes means rough outputs, and the app says so.
+- **Chance of profit** assumes a single log-normal distribution at the first expiry's ATM volatility. It ignores skew,
+  costs and early exits.
+
+</details>
+
+---
+
+## 🏗️ How it works
+
+```mermaid
+flowchart LR
+    subgraph Browser["🖥️ Browser (static/)"]
+        A["app.js<br/>state · URL · keys"] --> M["model.js<br/>buildChain → IV, Greeks, stats"]
+        M --> V["views-*.js<br/>render(root, ctx)"]
+        Q["quant.js<br/>pricing maths"] --> M
+    end
+    subgraph Server["🐍 server.py (127.0.0.1:8765)"]
+        S1["/api/quote"]
+        S2["/api/chain"]
+        S3["/api/history"]
+        C[("in-memory cache")]
+    end
+    A -- fetch --> S1 & S2 & S3
+    S1 & S3 -- yfinance --> Y["Yahoo Finance"]
+    S2 -- HTTPS --> N["Nasdaq"]
+    S2 -. fallback .-> Y
+    S1 & S2 & S3 --- C
+```
+
+The **server only fetches, caches and repackages** data. **All the maths runs in the browser**, in plain JavaScript
+modules with no build step: edit a file and reload the page.
+
+The server listens on `127.0.0.1` only and rejects requests that don't come from its own page (Host and
+`Sec-Fetch-Site` checks), so other websites can't use it.
+
+<details>
+<summary><b>📂 Project structure</b></summary>
+
+```
+options-viewer/
+├── server.py               # data server: endpoints, Nasdaq + Yahoo chain sources, cache (stdlib + yfinance)
+├── make_app.py             # builds the double-click macOS launcher
+├── tests.mjs               # pricing, model, strategy and live-chain checks
+├── tests-model.mjs         # chain-model checks on synthetic chains with known answers
+└── static/
+    ├── index.html          # page shell
+    ├── app.css             # every style
+    └── js/
+        ├── app.js          # state, loading, URL, command line, keyboard, list of views
+        ├── model.js        # chain model and strategy maths (data shapes documented at the top)
+        ├── quant.js        # Black-Scholes, binomial tree, IV solver, Greeks (units documented at the top)
+        ├── explain.js      # plain-English readings
+        ├── views-market.js # Overview and Price
+        ├── views-chain.js  # Chain and the contract panel
+        ├── views-vol.js    # Volatility and Open interest
+        ├── views-strategy.js # Strategy builder and Calculator
+        ├── learn.js        # lesson text
+        ├── learn-widgets.js# interactive lesson widgets
+        ├── glossary.js     # hover tips and glossary
+        ├── expiries.js     # shared expiry picker
+        ├── payoff.js       # shared P&L chart
+        ├── ui.js           # page and chart helpers
+        └── fmt.js          # number and date formatting
+```
+
+Start reading at `static/js/app.js`, then `model.js`, then any one view.
+
+</details>
+
+<details>
+<summary><b>🔧 Extending it</b></summary>
 
 - **A new view**: write `render(root, ctx)` in a views file and add it to `VIEWS` in `app.js`.
 - **A new lesson**: add an entry to `LESSONS` in `learn.js`.
-- **A new term**: add it to `TERMS` in `glossary.js`.
-- **Another data source** (a real-time one, say): write a `chain_<name>(symbol, kind)` in
-  `server.py` that returns the same rows as `chain_nasdaq`, and put it first in `get_chain()`.
+- **A new glossary term**: add it to `TERMS` in `glossary.js`.
+- **Another data source** (a real-time feed, say): write `chain_<name>(symbol, kind)` in `server.py` returning the same
+  rows as `chain_nasdaq`, and put it first in `get_chain()`.
 
-Many lines in the views are long, because each one builds a whole piece of the page. Turn on
-soft wrap in your editor when reading them.
+</details>
 
-## Tests
+---
 
-    node tests.mjs
+## ✅ Tests
 
-Eighteen checks run offline: the pricing formulas against textbook and reference values, the
-chain model on made-up chains with known answers, strategy maths, and hostile input from links.
-With the server running it also builds live chains for GEMI, SPY, SPX and VIX and checks that
-every number is sane. Set `TERMINAL_URL` if the server is on another port.
+```bash
+node tests.mjs
+```
 
-`server.py` checks its own parsing rules each time it starts.
+**24 checks.** 18 run offline: pricing formulas against textbook and reference values, the chain model on synthetic
+chains with known answers, strategy maths, and hostile input from links. With the server running, the other 6 build
+live chains for GEMI, SPY, SPX and VIX and check that every number is sane. Set `TERMINAL_URL` if the server is on
+another port.
 
-## If something goes wrong
+```
+ok  ^SPX: chain builds and every number is sane (22268 contracts, 57 expiries, 180 ms, Yahoo, live)
+ok  ^VIX: chain builds and every number is sane (1097 contracts, 11 expiries, 6 ms, Yahoo, live)
 
-- **"Cannot reach the local data server"**: the server has stopped. Open the app again, or run
-  `uv run server.py`, then press RETRY.
-- **The app icon does nothing**: it needs `uv` on this Mac. It always uses port 8765 and writes
-  its log to `~/Library/Logs/OptionsTerminal.log`.
-- **"REFRESH FAILED" in the status bar**: the latest update did not arrive, so the screen shows
-  older numbers. It retries every minute; press `r` to try now.
-- **No options for a ticker**: the free sources list none for crypto, futures, most funds and many
-  foreign shares. The price views still work.
-- **Charts are missing**: the chart library could not be fetched. Check the connection and reload.
+24 checks passed
+```
 
-## Not advice
+`server.py` also runs a self-test of its parsing rules every time it starts.
 
-This is a learning and analysis tool. The data is delayed and unofficial, nothing here is
-investment advice, and it cannot place orders.
+---
+
+## 🩺 Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| *"Cannot reach the local data server"* | The server stopped. Reopen the app or run `uv run server.py`, then press **RETRY** |
+| The app icon does nothing | It needs `uv` installed. It always uses port 8765 and logs to `~/Library/Logs/OptionsTerminal.log` |
+| *"REFRESH FAILED"* in the status bar | The latest update didn't arrive. It retries every minute; press <kbd>r</kbd> to try now |
+| No options for a ticker | Free sources don't list options for crypto, futures, most funds and many foreign shares. Price views still work |
+| Charts are missing | Plotly loads from a CDN. Check your connection and reload |
+
+---
+
+## ⚠️ Disclaimer
+
+This is a learning and analysis tool. The data is delayed and unofficial, **nothing here is investment advice**,
+and the app cannot place orders.
+
+<div align="center">
+<sub>Built by <a href="https://github.com/Pseudocoder28">@Pseudocoder28</a></sub>
+</div>
