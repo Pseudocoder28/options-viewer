@@ -6,31 +6,35 @@
 //   chain     { symbol, source, spot, rate, pricedAt, expiries, contracts, mode, ivMeasured,
 //               totals: { vol, oi, callVol, putVol, callOI, putOI }, iv30, ivAtDays(days) }
 //
-//   expiry    { label, date, root, am, close     as sent by the server. label is unique; a date can repeat (SPX and SPXW)
+//   expiry    { label, date, root, am, close     as sent by the server. label is unique; a date can repeat (SPX, SPXW)
 //               days                             calendar days from now: what a person means by "days to expiry"
 //               T                                years from when the quotes were taken: what the formulas use
 //               calls, puts, strikes, rows       contracts by side; rows is a Map of strike -> { strike, call, put }
 //               mode                             which prices are trusted: 'live' quotes | 'last' trades | 'none'
-//               F, forwardSrc                    forward price and where it came from: 'parity' (call and put prices) | 'carry' (rates)
-//               S, basis, q                      the spot the options imply, that spot / the quoted one, the dividend yield
-//               smile, ivAt(strike), atmIV       the volatility curve: its quoted points, a reader for any strike, its level at the money
-//               smileSrc                         how far to trust atmIV: 'quotes' (measured) | 'wing' (guessed) | 'borrowed' (from a neighbour)
-//               atmStrike, straddle, em          strike nearest the forward, its call + put price, expected move in dollars
+//               F, forwardSrc                    forward price and where it came from:
+//                                                'parity' (call and put prices) | 'carry' (rates)
+//               S, basis, q                      the spot the options imply, that spot / the quoted one, dividend yield
+//               smile, ivAt(strike), atmIV       the volatility curve: its quoted points, a reader for any strike,
+//                                                its level at the money
+//               smileSrc                         how far to trust atmIV: 'quotes' (measured) | 'wing' (guessed)
+//                                                | 'borrowed' (from a neighbour)
+//               atmStrike, straddle, em          strike nearest the forward, its call + put price, expected move in $
 //               stats, maxPain, kind, i }        kind: 'weekly' | 'monthly' | 'quarterly' | 'leap'
 //
 //   contract  { id, symbol, exp, put, strike     id is unique in the chain; symbol is the exchange's code (OCC)
 //               bid, ask, last, chg, vol, oi     as quoted, per share
 //               two, mid, mark                   has both a bid and an ask?, their middle, the price actually used
 //               spread, spreadPct                ask - bid, in dollars and as a share of the mid
-//               iv, ivBid, ivAsk, ivQ            its own implied vol, and how well the quote pins it: 'tight' | 'ok' | 'wide' | 'stale'
+//               iv, ivBid, ivAsk, ivQ            its own implied vol, and how well the quote pins it:
+//                                                'tight' | 'ok' | 'wide' | 'stale'
 //               sigma, sigmaSrc                  the vol its Greeks use: its 'own' quote, or read off the 'smile'
 //               intrinsic, extrinsic, itm, theo  per share. extrinsic (time value) can be negative
 //               delta, gamma, theta, vega, rho, probITM }      units are listed at the top of quant.js
 import * as Q from './quant.js';
 
 export const YEAR = 365 * 86400;
-export const MULT = 100;          // shares per standard contract
-const MAX_IV = 10;                // ignore solved vols above 1000%
+export const MULT = 100; // shares per standard contract
+const MAX_IV = 10; // ignore solved vols above 1000%
 const usable = c => c && c.iv != null && c.ivQ !== 'wide';
 
 // ---------------------------------------------------------------- chain
@@ -46,19 +50,42 @@ const usable = c => c && c.iv != null && c.ivQ !== 'wide';
  * that keeps running would inflate every near-dated volatility a little more each hour.
  */
 export function buildChain(raw, quote, now = Date.now() / 1000) {
-  const S = quote.price, r = quote.rate ?? 0.04, q0 = quote.dividendYield || 0;
+  const S = quote.price,
+    r = quote.rate ?? 0.04,
+    q0 = quote.dividendYield || 0;
   // The quote's own time is used only when it is plausibly the last close (not a ticker that stopped trading days ago).
   const frozen = quote.marketState && quote.marketState !== 'REGULAR' && quote.time > now - 5 * 86400;
   const pricedAt = frozen ? Math.min(quote.time, now) : now;
   const f = Object.fromEntries(raw.fields.map((name, i) => [name, i]));
-  const expiries = raw.expiries.map(e => ({ ...e, T: (e.close - pricedAt) / YEAR, days: (e.close - now) / 86400, calls: [], puts: [] }));
+  const expiries = raw.expiries.map(e => ({
+    ...e,
+    T: (e.close - pricedAt) / YEAR,
+    days: (e.close - now) / 86400,
+    calls: [],
+    puts: [],
+  }));
   const open = e => e.T > 0 && e.days > 0;
   for (const row of raw.rows) {
     const exp = expiries[row[f.e]];
     if (!exp || !open(exp)) continue;
-    const put = row[f.put] === 1, bid = row[f.bid] || 0, ask = row[f.ask] || 0, two = bid > 0 && ask >= bid;
-    const c = { exp, put, strike: row[f.strike], bid, ask, last: row[f.last], chg: row[f.chg], vol: row[f.vol] || 0,
-                oi: row[f.oi] || 0, lastTrade: row[f.lastTrade], two, mid: two ? (bid + ask) / 2 : null };
+    const put = row[f.put] === 1,
+      bid = row[f.bid] || 0,
+      ask = row[f.ask] || 0,
+      two = bid > 0 && ask >= bid;
+    const c = {
+      exp,
+      put,
+      strike: row[f.strike],
+      bid,
+      ask,
+      last: row[f.last],
+      chg: row[f.chg],
+      vol: row[f.vol] || 0,
+      oi: row[f.oi] || 0,
+      lastTrade: row[f.lastTrade],
+      two,
+      mid: two ? (bid + ask) / 2 : null,
+    };
     c.id = `${exp.label}|${put ? 'P' : 'C'}|${c.strike}`;
     c.symbol = occSymbol(exp.root, exp.date, put, c.strike);
     (put ? exp.puts : exp.calls).push(c);
@@ -69,7 +96,10 @@ export function buildChain(raw, quote, now = Date.now() / 1000) {
   let latest = 0;
   for (const row of raw.rows) if (row[f.lastTrade] > latest) latest = row[f.lastTrade];
   const fresh = c => c.last > 0 && (c.lastTrade == null || c.lastTrade >= latest - 8 * 3600);
-  live.forEach((e, i) => { e.i = i; analyseExpiry(e, S, r, q0, fresh); });
+  live.forEach((e, i) => {
+    e.i = i;
+    analyseExpiry(e, S, r, q0, fresh);
+  });
 
   // Expiries without a measured at-the-money volatility take the level of the nearest expiry that
   // has one ('borrowed'). Their own far-out quotes, if any, still shape the curve away from the
@@ -81,7 +111,9 @@ export function buildChain(raw, quote, now = Date.now() / 1000) {
     if (!keep && donors.length) {
       const level = donors.reduce((a, b) => (Math.abs(b.T - e.T) < Math.abs(a.T - e.T) ? b : a)).atmIV;
       const pts = [...e.smile.map(n => [n.k, n.iv]), [0, level]].sort((a, b) => a[0] - b[0]);
-      const ks = pts.map(p => p[0]), ivs = pts.map(p => p[1]), F = e.F;
+      const ks = pts.map(p => p[0]),
+        ivs = pts.map(p => p[1]),
+        F = e.F;
       Object.assign(e, { atmIV: level, ivAt: K => Q.interp(ks, ivs, Math.log(K / F)), smileSrc: 'borrowed' });
     }
     finishExpiry(e, S, r);
@@ -90,11 +122,27 @@ export function buildChain(raw, quote, now = Date.now() / 1000) {
   const total = key => Q.sum(contracts.map(c => c[key]));
   const tot = put => key => Q.sum(contracts.filter(c => c.put === put).map(c => c[key]));
   const chain = {
-    symbol: raw.symbol, source: raw.source, asOf: raw.asOf, stale: !!raw.stale, adjustedDropped: raw.adjustedDropped || 0,
-    spot: S, rate: r, pricedAt, expiries: live, contracts,
+    symbol: raw.symbol,
+    source: raw.source,
+    asOf: raw.asOf,
+    stale: !!raw.stale,
+    adjustedDropped: raw.adjustedDropped || 0,
+    spot: S,
+    rate: r,
+    pricedAt,
+    expiries: live,
+    contracts,
     mode: live.some(e => e.mode === 'live') ? 'live' : live.some(e => e.mode === 'last') ? 'last' : 'none',
-    ivMeasured: measured.length > 0,       // false: no option near the money has a usable quote, so every volatility here is a rough guess
-    totals: { vol: total('vol'), oi: total('oi'), callVol: tot(false)('vol'), putVol: tot(true)('vol'), callOI: tot(false)('oi'), putOI: tot(true)('oi') },
+    // false: no option near the money has a usable quote, so every volatility here is a rough guess
+    ivMeasured: measured.length > 0,
+    totals: {
+      vol: total('vol'),
+      oi: total('oi'),
+      callVol: tot(false)('vol'),
+      putVol: tot(true)('vol'),
+      callOI: tot(false)('oi'),
+      putOI: tot(true)('oi'),
+    },
   };
   chain.ivAtDays = days => ivAtDays(chain, days);
   chain.iv30 = chain.ivAtDays(30);
@@ -107,7 +155,8 @@ export function occSymbol(root, date, put, strike) {
 
 function analyseExpiry(exp, S, r, q0, fresh) {
   const byStrike = (a, b) => a.strike - b.strike;
-  exp.calls.sort(byStrike); exp.puts.sort(byStrike);
+  exp.calls.sort(byStrike);
+  exp.puts.sort(byStrike);
   const all = [...exp.calls, ...exp.puts];
   exp.rows = new Map();
   for (const c of all) {
@@ -119,7 +168,8 @@ function analyseExpiry(exp, S, r, q0, fresh) {
   // quotes after the close) but the session's last trades are known to be recent, so use those.
   // A feed without trade times (Nasdaq) cannot show that its last trades are recent, so there any
   // quote at all wins: an old last trade must never override a live bid and ask.
-  const quotedCount = all.filter(c => c.two).length, freshCount = all.filter(fresh).length;
+  const quotedCount = all.filter(c => c.two).length,
+    freshCount = all.filter(fresh).length;
   const timed = all.some(c => c.lastTrade != null);
   const quotesWin = quotedCount > 0 && (!timed || quotedCount >= 0.1 * all.length || freshCount <= quotedCount);
   exp.mode = quotesWin ? 'live' : freshCount ? 'last' : 'none';
@@ -135,15 +185,20 @@ function analyseExpiry(exp, S, r, q0, fresh) {
   const cands = [];
   for (const { strike, call, put } of exp.rows.values()) {
     if (call?.mark == null || put?.mark == null) continue;
-    const width = exp.mode === 'live' ? (call.ask - call.bid) + (put.ask - put.bid) : 0;
+    const width = exp.mode === 'live' ? call.ask - call.bid + (put.ask - put.bid) : 0;
     cands.push({ strike, diff: call.mark - put.mark, width });
   }
-  cands.sort((a, b) => (Math.abs(a.diff) + a.width) - (Math.abs(b.diff) + b.width));
+  cands.sort((a, b) => Math.abs(a.diff) + a.width - (Math.abs(b.diff) + b.width));
   let F = carry;
   exp.forwardSrc = 'carry';
   if (cands.length && cands[0].width <= 0.12 * S) {
-    const guess = Q.median(cands.slice(0, exp.mode === 'live' ? 3 : 5).map(c => c.strike + Math.exp(r * exp.T) * c.diff));
-    if (guess > 0 && Math.abs(Math.log(guess / S)) < 0.7) { F = guess; exp.forwardSrc = 'parity'; }
+    const guess = Q.median(
+      cands.slice(0, exp.mode === 'live' ? 3 : 5).map(c => c.strike + Math.exp(r * exp.T) * c.diff),
+    );
+    if (guess > 0 && Math.abs(Math.log(guess / S)) < 0.7) {
+      F = guess;
+      exp.forwardSrc = 'parity';
+    }
   }
   // Only F is measured. q stays the quoted dividend yield, and S is whatever spot makes
   // S * e^((r - q)T) equal F: the spot price the options themselves imply. For a stock it sits
@@ -162,7 +217,9 @@ function analyseExpiry(exp, S, r, q0, fresh) {
   for (const c of all) {
     c.iv = c.ivBid = c.ivAsk = c.ivQ = null;
     if (c.two && exp.mode === 'live') {
-      c.iv = iv(c.mid, c); c.ivAsk = iv(c.ask, c); c.ivBid = iv(c.bid, c) ?? 0;
+      c.iv = iv(c.mid, c);
+      c.ivAsk = iv(c.ask, c);
+      c.ivBid = iv(c.bid, c) ?? 0;
       if (c.iv != null && c.ivAsk != null) {
         const range = c.ivAsk - c.ivBid;
         c.ivQ = range <= 0.05 + 0.25 * c.iv ? 'tight' : range <= 1 ? 'ok' : 'wide';
@@ -178,9 +235,23 @@ function analyseExpiry(exp, S, r, q0, fresh) {
   // money stands in when the other side has no quote.
   let nodes = [];
   for (const { strike, call, put } of exp.rows.values()) {
-    const otm = strike < F ? put : call, itm = strike < F ? call : put;
-    const pick = usable(otm) ? otm : usable(itm) && itm.ivQ === 'tight' && Math.abs(Math.log(strike / F)) < 0.25 ? itm : null;
-    if (pick) nodes.push({ strike, k: Math.log(strike / F), iv: pick.iv, lo: pick.ivBid, hi: pick.ivAsk, put: pick.put, q: pick.ivQ });
+    const otm = strike < F ? put : call,
+      itm = strike < F ? call : put;
+    const pick = usable(otm)
+      ? otm
+      : usable(itm) && itm.ivQ === 'tight' && Math.abs(Math.log(strike / F)) < 0.25
+        ? itm
+        : null;
+    if (pick)
+      nodes.push({
+        strike,
+        k: Math.log(strike / F),
+        iv: pick.iv,
+        lo: pick.ivBid,
+        hi: pick.ivAsk,
+        put: pick.put,
+        q: pick.ivQ,
+      });
   }
   nodes.sort((a, b) => a.strike - b.strike);
   const untrimmed = nodes;
@@ -194,24 +265,32 @@ function analyseExpiry(exp, S, r, q0, fresh) {
     });
   }
   exp.smile = nodes;
-  exp.trimmed = new Set(untrimmed.filter(n => !nodes.includes(n)).map(n => n.strike));    // strikes whose own quote was judged bad
-  exp.nodeSide = new Map(nodes.map(n => [n.strike, n.put]));                               // strike -> which side's quote is the node there
+  // Strikes whose own quote was judged bad.
+  exp.trimmed = new Set(untrimmed.filter(n => !nodes.includes(n)).map(n => n.strike));
+  exp.nodeSide = new Map(nodes.map(n => [n.strike, n.put])); // strike -> which side's quote is the node there
   // smileSrc says how far the at-the-money reading can be trusted:
   //   'quotes'   measured: there are quotes on both sides of the forward, or one within 10% of it
   //   'wing'     a rough guess: the only quotes are far out on one side, and the curve is simply
   //              continued flat to the money (buildChain replaces it when a neighbour has a real reading)
   //   null       no usable quote at all (buildChain then borrows a neighbour's level: 'borrowed')
   if (nodes.length) {
-    const ks = nodes.map(n => n.k), ivs = nodes.map(n => n.iv);
-    const bothSides = ks[0] <= 0 && ks[ks.length - 1] >= 0, nearMoney = ks.some(k => Math.abs(k) < 0.10);
+    const ks = nodes.map(n => n.k),
+      ivs = nodes.map(n => n.iv);
+    const bothSides = ks[0] <= 0 && ks[ks.length - 1] >= 0,
+      nearMoney = ks.some(k => Math.abs(k) < 0.1);
     exp.ivAt = K => Q.interp(ks, ivs, Math.log(K / F));
     exp.atmIV = exp.ivAt(F);
     exp.smileSrc = bothSides || nearMoney ? 'quotes' : 'wing';
-  } else { exp.ivAt = null; exp.atmIV = null; exp.smileSrc = null; }
+  } else {
+    exp.ivAt = null;
+    exp.atmIV = null;
+    exp.smileSrc = null;
+  }
 }
 
 function finishExpiry(exp, S, r) {
-  const all = [...exp.calls, ...exp.puts], F = exp.F;
+  const all = [...exp.calls, ...exp.puts],
+    F = exp.F;
   for (const c of all) {
     // One volatility per strike. The out-of-the-money contract's own quote sets it (that quote is
     // the node on the smile); the in-the-money contract at the same strike takes the smile's value,
@@ -220,9 +299,16 @@ function finishExpiry(exp, S, r) {
     const otm = c.put ? c.strike < F : c.strike >= F;
     const isNode = exp.nodeSide.get(c.strike) === c.put;
     const trusted = isNode || (otm && usable(c) && !exp.trimmed.has(c.strike));
-    if (trusted) { c.sigma = c.iv; c.sigmaSrc = 'own'; }
-    else if (exp.ivAt) { c.sigma = exp.ivAt(c.strike); c.sigmaSrc = 'smile'; }
-    else { c.sigma = usable(c) ? c.iv : null; c.sigmaSrc = c.sigma != null ? 'own' : null; }    // no curve at all: its own quote or nothing
+    if (trusted) {
+      c.sigma = c.iv;
+      c.sigmaSrc = 'own';
+    } else if (exp.ivAt) {
+      c.sigma = exp.ivAt(c.strike);
+      c.sigmaSrc = 'smile';
+    } else {
+      c.sigma = usable(c) ? c.iv : null;
+      c.sigmaSrc = c.sigma != null ? 'own' : null;
+    } // no curve at all: its own quote or nothing
     c.intrinsic = Q.intrinsic(exp.S, c.strike, c.put);
     c.itm = c.intrinsic > 0;
     // Time value can be negative: a deep in-the-money option that cannot be exercised yet (index
@@ -230,8 +316,17 @@ function finishExpiry(exp, S, r) {
     c.extrinsic = c.mark != null ? c.mark - c.intrinsic : null;
     if (c.sigma != null) {
       const g = Q.bsm({ S: exp.S, K: c.strike, T: exp.T, r, q: exp.q, vol: c.sigma, put: c.put });
-      Object.assign(c, { theo: g.price, delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega, rho: g.rho, probITM: g.probITM });
-    } else Object.assign(c, { theo: null, delta: null, gamma: null, theta: null, vega: null, rho: null, probITM: null });
+      Object.assign(c, {
+        theo: g.price,
+        delta: g.delta,
+        gamma: g.gamma,
+        theta: g.theta,
+        vega: g.vega,
+        rho: g.rho,
+        probITM: g.probITM,
+      });
+    } else
+      Object.assign(c, { theo: null, delta: null, gamma: null, theta: null, vega: null, rho: null, probITM: null });
   }
   const side = (list, key) => Q.sum(list.map(c => c[key]));
   const nearMoney = all.filter(c => c.two && Math.abs(Math.log(c.strike / F)) < 0.2);
@@ -239,23 +334,33 @@ function finishExpiry(exp, S, r) {
   exp.atmStrike = exp.strikes.reduce((a, b) => (Math.abs(b - F) < Math.abs(a - F) ? b : a));
   const atm = exp.rows.get(exp.atmStrike);
   exp.straddle = atm.call?.mark != null && atm.put?.mark != null ? atm.call.mark + atm.put.mark : null;
-  exp.em = exp.atmIV != null ? F * exp.atmIV * Math.sqrt(exp.T) : null;       // one standard deviation, in dollars
+  exp.em = exp.atmIV != null ? F * exp.atmIV * Math.sqrt(exp.T) : null; // one standard deviation, in dollars
   exp.stats = {
-    callVol: side(exp.calls, 'vol'), putVol: side(exp.puts, 'vol'), callOI: side(exp.calls, 'oi'), putOI: side(exp.puts, 'oi'),
-    quoted: quoted.length, total: all.length,
-    medSpread: (nearMoney.length ? nearMoney : quoted).length ? Q.median((nearMoney.length ? nearMoney : quoted).map(c => c.spreadPct)) : null,
+    callVol: side(exp.calls, 'vol'),
+    putVol: side(exp.puts, 'vol'),
+    callOI: side(exp.calls, 'oi'),
+    putOI: side(exp.puts, 'oi'),
+    quoted: quoted.length,
+    total: all.length,
+    medSpread: (nearMoney.length ? nearMoney : quoted).length
+      ? Q.median((nearMoney.length ? nearMoney : quoted).map(c => c.spreadPct))
+      : null,
   };
   exp.maxPain = maxPain(exp).strike;
   exp.kind = expiryKind(exp);
 }
 
-/** 'monthly' (the standard series), 'quarterly' (last trading day of a quarter), 'leap' (over a year out) or 'weekly'. */
+/**
+ * The kind of an expiry: 'monthly' (the standard series), 'quarterly' (last trading day of a quarter),
+ * 'leap' (over a year out) or 'weekly'.
+ */
 export function expiryKind(exp) {
-  const [y, m, d] = exp.date.split('-').map(Number), day = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const [y, m, d] = exp.date.split('-').map(Number),
+    day = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
   if (exp.days > 365) return 'leap';
   // The standard monthly is the third Friday, or a morning-settled index series (VIX monthlies fall on a Wednesday).
   if ((day === 5 && d >= 15 && d <= 21) || (exp.am && !exp.root?.endsWith('W'))) return 'monthly';
-  const last = new Date(Date.UTC(y, m, 0));                       // last day of the month, stepped back to a weekday
+  const last = new Date(Date.UTC(y, m, 0)); // last day of the month, stepped back to a weekday
   while (last.getUTCDay() === 0 || last.getUTCDay() === 6) last.setUTCDate(last.getUTCDate() - 1);
   if (m % 3 === 0 && d === last.getUTCDate()) return 'quarterly';
   return 'weekly';
@@ -271,7 +376,8 @@ export function moveRange(F, vol, T) {
 export function termStructure(chain) {
   const own = chain.expiries.filter(e => e.atmIV != null && e.smileSrc === 'quotes' && e.days >= 1);
   return own.filter((e, i) => {
-    // A high first or last point is often real (an event just ahead), so an end point with a well-quoted smile always stays.
+    // A high first or last point is often real (an event just ahead),
+    // so an end point with a well-quoted smile always stays.
     if ((i === 0 || i === own.length - 1) && e.smile.length >= 3) return true;
     const m = Q.median(own.slice(Math.max(0, i - 2), i + 3).map(x => x.atmIV));
     return Math.abs(e.atmIV - m) <= 0.6 * m;
@@ -281,13 +387,25 @@ export function termStructure(chain) {
 /** At-the-money implied vol at a constant maturity, interpolating total variance between expiries. */
 function ivAtDays(chain, days) {
   const own = termStructure(chain);
-  const pts = (own.length ? own : chain.expiries.filter(e => e.atmIV != null && e.days >= 1)).map(e => ({ T: e.T, w: e.atmIV ** 2 * e.T }));
+  const pts = (own.length ? own : chain.expiries.filter(e => e.atmIV != null && e.days >= 1)).map(e => ({
+    T: e.T,
+    w: e.atmIV ** 2 * e.T,
+  }));
   if (!pts.length) return null;
   const T = days / 365;
   if (T <= pts[0].T) return Math.sqrt(pts[0].w / pts[0].T);
   const last = pts[pts.length - 1];
   if (T >= last.T) return Math.sqrt(last.w / last.T);
-  return Math.sqrt(Math.max(Q.interp(pts.map(p => p.T), pts.map(p => p.w), T), 0) / T);
+  return Math.sqrt(
+    Math.max(
+      Q.interp(
+        pts.map(p => p.T),
+        pts.map(p => p.w),
+        T,
+      ),
+      0,
+    ) / T,
+  );
 }
 
 // ---------------------------------------------------------------- positioning analytics
@@ -297,14 +415,28 @@ function ivAtDays(chain, days) {
  * Returns { strikes, pain: dollars paid out at each strike, strike: the low point (null with no open interest) }.
  */
 export function maxPain(exp) {
-  const K = exp.strikes, n = K.length, pain = new Array(n).fill(0);
-  const oi = side => K.map(k => exp.rows.get(k)[side]?.oi || 0), callOI = oi('call'), putOI = oi('put');
+  const K = exp.strikes,
+    n = K.length,
+    pain = new Array(n).fill(0);
+  const oi = side => K.map(k => exp.rows.get(k)[side]?.oi || 0),
+    callOI = oi('call'),
+    putOI = oi('put');
   // Walking up the strikes, every call already passed gains the step just taken, so the payout to
   // calls is a running sum (and the same for puts walking down). One pass each way, not one per pair.
-  for (let j = 1, passed = 0, owed = 0; j < n; j++) { passed += callOI[j - 1]; owed += passed * (K[j] - K[j - 1]); pain[j] += owed; }
-  for (let j = n - 2, passed = 0, owed = 0; j >= 0; j--) { passed += putOI[j + 1]; owed += passed * (K[j + 1] - K[j]); pain[j] += owed; }
+  for (let j = 1, passed = 0, owed = 0; j < n; j++) {
+    passed += callOI[j - 1];
+    owed += passed * (K[j] - K[j - 1]);
+    pain[j] += owed;
+  }
+  for (let j = n - 2, passed = 0, owed = 0; j >= 0; j--) {
+    passed += putOI[j + 1];
+    owed += passed * (K[j + 1] - K[j]);
+    pain[j] += owed;
+  }
   let best = 0;
-  pain.forEach((p, i) => { if (p < pain[best]) best = i; });
+  pain.forEach((p, i) => {
+    if (p < pain[best]) best = i;
+  });
   const any = Q.sum(callOI) + Q.sum(putOI) > 0;
   return { strikes: K, pain: pain.map(p => p * MULT), strike: any ? K[best] : null };
 }
@@ -312,16 +444,18 @@ export function maxPain(exp) {
 /** Open interest, volume and gamma exposure per strike, for one expiry or summed over several. */
 export function byStrike(expiries) {
   const map = new Map();
-  for (const e of expiries) for (const c of [...e.calls, ...e.puts]) {
-    if (!map.has(c.strike)) map.set(c.strike, { strike: c.strike, callOI: 0, putOI: 0, callVol: 0, putVol: 0, gex: 0 });
-    const row = map.get(c.strike);
-    row[c.put ? 'putOI' : 'callOI'] += c.oi;
-    row[c.put ? 'putVol' : 'callVol'] += c.vol;
-    // Dealer gamma exposure in dollars per 1% move, under the usual assumption that dealers are
-    // long calls and short puts. It is an estimate: nobody publishes who holds which side.
-    // Gamma is per $1 of the expiry's own implied spot (e.S), so that is the price squared here.
-    if (c.gamma != null) row.gex += (c.put ? -1 : 1) * c.gamma * c.oi * MULT * e.S * e.S * 0.01;
-  }
+  for (const e of expiries)
+    for (const c of [...e.calls, ...e.puts]) {
+      if (!map.has(c.strike))
+        map.set(c.strike, { strike: c.strike, callOI: 0, putOI: 0, callVol: 0, putVol: 0, gex: 0 });
+      const row = map.get(c.strike);
+      row[c.put ? 'putOI' : 'callOI'] += c.oi;
+      row[c.put ? 'putVol' : 'callVol'] += c.vol;
+      // Dealer gamma exposure in dollars per 1% move, under the usual assumption that dealers are
+      // long calls and short puts. It is an estimate: nobody publishes who holds which side.
+      // Gamma is per $1 of the expiry's own implied spot (e.S), so that is the price squared here.
+      if (c.gamma != null) row.gex += (c.put ? -1 : 1) * c.gamma * c.oi * MULT * e.S * e.S * 0.01;
+    }
   return [...map.values()].sort((a, b) => a.strike - b.strike);
 }
 
@@ -334,14 +468,17 @@ export function byStrike(expiries) {
 export function atDelta(exp, target, put, r) {
   if (!exp.ivAt || exp.atmIV == null || !exp.smile?.length) return null;
   const width = Math.max(exp.atmIV * Math.sqrt(exp.T), 0.02);
-  const first = exp.smile[0].strike, last = exp.smile[exp.smile.length - 1].strike;
+  const first = exp.smile[0].strike,
+    last = exp.smile[exp.smile.length - 1].strike;
   let prev = null;
   for (let i = 0; i <= 240; i++) {
-    const K = exp.F * Math.exp((put ? -1 : 1) * (i / 240) * 4 * width), vol = exp.ivAt(K);
+    const K = exp.F * Math.exp((put ? -1 : 1) * (i / 240) * 4 * width),
+      vol = exp.ivAt(K);
     const d = Math.abs(Q.bsm({ S: exp.S, K, T: exp.T, r, q: exp.q, vol, put }).delta);
     if (d <= target) {
-      if (!prev) return null;              // even at the forward the delta is below the target (very high volatility or a long time)
-      const w = (prev.d - target) / (prev.d - d || 1), strike = prev.K + (K - prev.K) * w;
+      if (!prev) return null; // even at the forward the delta is below the target (very high volatility or a long time)
+      const w = (prev.d - target) / (prev.d - d || 1),
+        strike = prev.K + (K - prev.K) * w;
       return strike < first || strike > last ? null : { strike, iv: prev.vol + (vol - prev.vol) * w };
     }
     prev = { K, vol, d };
@@ -354,31 +491,46 @@ export function riskReversal(exp, r) {
   // Worked out once per expiry and kept on it: several panels ask, and each answer costs a few
   // hundred model prices. A refreshed chain is a new set of expiry objects, so nothing goes stale.
   if (exp.rr === undefined) {
-    const c = exp.smile?.length >= 3 ? atDelta(exp, 0.25, false, r) : null, p = c && atDelta(exp, 0.25, true, r);
+    const c = exp.smile?.length >= 3 ? atDelta(exp, 0.25, false, r) : null,
+      p = c && atDelta(exp, 0.25, true, r);
     exp.rr = c && p ? { call: c, put: p, rr: c.iv - p.iv } : null;
   }
   return exp.rr;
 }
 
 export function topContracts(chain, score, n = 12) {
-  return chain.contracts.map(c => ({ c, s: score(c) })).filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, n).map(x => x.c);
+  return chain.contracts
+    .map(c => ({ c, s: score(c) }))
+    .filter(x => x.s > 0)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, n)
+    .map(x => x.c);
 }
 
 // ---------------------------------------------------------------- price history
 
 export function historyStats(h) {
-  const c = h.c, n = c.length;
+  const c = h.c,
+    n = c.length;
   if (n < 2) return null;
   const rets = [];
   for (let i = 1; i < n; i++) rets.push(c[i] / c[i - 1] - 1);
-  const hi = Math.max(...h.h.filter(x => x != null)), lo = Math.min(...h.l.filter(x => x != null));
-  const best = Math.max(...rets), worst = Math.min(...rets);
+  const hi = Math.max(...h.h.filter(x => x != null)),
+    lo = Math.min(...h.l.filter(x => x != null));
+  const best = Math.max(...rets),
+    worst = Math.min(...rets);
   return {
-    change: c[n - 1] / c[0] - 1, high: hi, low: lo, bars: n,
+    change: c[n - 1] / c[0] - 1,
+    high: hi,
+    low: lo,
+    bars: n,
     upShare: rets.filter(x => x > 0).length / rets.length,
     avgRange: Q.mean(h.h.map((x, i) => (x - h.l[i]) / c[i]).filter(Number.isFinite)),
-    avgAbsMove: Q.mean(rets.map(Math.abs)), best, worst,
-    bestAt: h.t[rets.indexOf(best) + 1], worstAt: h.t[rets.indexOf(worst) + 1],
+    avgAbsMove: Q.mean(rets.map(Math.abs)),
+    best,
+    worst,
+    bestAt: h.t[rets.indexOf(best) + 1],
+    worstAt: h.t[rets.indexOf(worst) + 1],
   };
 }
 
@@ -390,15 +542,33 @@ export function historyStats(h) {
 
 export function legFromContract(c, side, qty = 1, price = null, now = Date.now() / 1000) {
   const natural = side > 0 ? c.ask || c.mark : c.bid || c.mark;
-  return { kind: c.put ? 'P' : 'C', side, qty, strike: c.strike, close: c.exp.close, date: c.exp.date, expLabel: c.exp.label,
-           q: c.exp.q, basis: c.exp.basis, t0: now, sigma: c.sigma ?? c.exp.atmIV ?? 0.5,
-           price: price ?? c.mark ?? c.theo ?? natural ?? 0, bid: c.bid, ask: c.ask, id: c.id, symbol: c.symbol };
+  return {
+    kind: c.put ? 'P' : 'C',
+    side,
+    qty,
+    strike: c.strike,
+    close: c.exp.close,
+    date: c.exp.date,
+    expLabel: c.exp.label,
+    q: c.exp.q,
+    basis: c.exp.basis,
+    t0: now,
+    sigma: c.sigma ?? c.exp.atmIV ?? 0.5,
+    price: price ?? c.mark ?? c.theo ?? natural ?? 0,
+    bid: c.bid,
+    ask: c.ask,
+    id: c.id,
+    symbol: c.symbol,
+  };
 }
 export const stockLeg = (side, shares, price) => ({ kind: 'S', side, qty: shares, price });
 
 /** Legs as short text for the address bar: "12xGEMI261204P00002000@0.4,-1xGEMI261204P00001500@0.05,100S@1.36". */
-export const encodeLegs = legs => legs.map(l => `${l.side < 0 ? '-' : ''}${l.qty}${l.kind === 'S' ? 'S' : 'x' + l.symbol}@${+(+l.price).toFixed(4)}`).join(',');
-const MAX_LEGS = 20;       // more than any real position; a link cannot stuff the builder with thousands
+export const encodeLegs = legs =>
+  legs
+    .map(l => `${l.side < 0 ? '-' : ''}${l.qty}${l.kind === 'S' ? 'S' : 'x' + l.symbol}@${+(+l.price).toFixed(4)}`)
+    .join(',');
+const MAX_LEGS = 20; // more than any real position; a link cannot stuff the builder with thousands
 /**
  * The reverse. Option legs are matched to live contracts by symbol; any that are no longer listed
  * are dropped, as is anything malformed. The text comes from a link, so every number is bounded.
@@ -408,9 +578,14 @@ export function decodeLegs(text, chain) {
   for (const part of String(text).split(',').slice(0, 200)) {
     const m = part.match(/^(-?)(\d{1,7})(S|x([A-Z0-9]{1,32}))@(\d{1,9}(?:\.\d{1,6})?|\.\d{1,6})$/);
     if (!m || +m[2] === 0 || legs.length >= MAX_LEGS) continue;
-    const side = m[1] ? -1 : 1, qty = +m[2], price = +m[5];
+    const side = m[1] ? -1 : 1,
+      qty = +m[2],
+      price = +m[5];
     if (m[3] === 'S') legs.push(stockLeg(side, qty, price));
-    else { const c = chain.contracts.find(x => x.symbol === m[4]); if (c) legs.push(legFromContract(c, side, qty, price)); }
+    else {
+      const c = chain.contracts.find(x => x.symbol === m[4]);
+      if (c) legs.push(legFromContract(c, side, qty, price));
+    }
   }
   return legs;
 }
@@ -426,12 +601,14 @@ function legSpot(leg, S, T) {
 /** Value of one unit of a leg (per share) if the stock is at S at time t. volShift is in vol decimals. */
 export function legValue(leg, S, t, r, volShift = 0) {
   if (leg.kind === 'S') return S;
-  const T = (leg.close - t) / YEAR, put = leg.kind === 'P';
+  const T = (leg.close - t) / YEAR,
+    put = leg.kind === 'P';
   if (!(T > 0)) return Q.intrinsic(S, leg.strike, put);
   return Q.bsPrice(legSpot(leg, S, T), leg.strike, T, r, leg.q || 0, Math.max(leg.sigma + volShift, 0.01), put);
 }
 export const positionCost = legs => Q.sum(legs.map(l => l.side * l.qty * legMult(l) * l.price));
-export const positionValue = (legs, S, t, r, volShift = 0) => Q.sum(legs.map(l => l.side * l.qty * legMult(l) * legValue(l, S, t, r, volShift)));
+export const positionValue = (legs, S, t, r, volShift = 0) =>
+  Q.sum(legs.map(l => l.side * l.qty * legMult(l) * legValue(l, S, t, r, volShift)));
 export const positionPnl = (legs, S, t, r, volShift = 0) => positionValue(legs, S, t, r, volShift) - positionCost(legs);
 
 /** Net Greeks of the whole position in dollar terms: delta in shares, theta in $ per day, vega in $ per vol point. */
@@ -439,7 +616,10 @@ export function positionGreeks(legs, S, t, r) {
   const out = { delta: 0, gamma: 0, theta: 0, vega: 0, rho: 0 };
   for (const l of legs) {
     const n = l.side * l.qty * legMult(l);
-    if (l.kind === 'S') { out.delta += n; continue; }
+    if (l.kind === 'S') {
+      out.delta += n;
+      continue;
+    }
     const T = (l.close - t) / YEAR;
     if (!(T > 0)) continue;
     const g = Q.bsm({ S: legSpot(l, S, T), K: l.strike, T, r, q: l.q || 0, vol: l.sigma, put: l.kind === 'P' });
@@ -464,7 +644,7 @@ export function analysePosition(legs, { S, r, now, vol }) {
   const lo = Math.min(S * Math.exp(-w), ...(strikes.length ? [Math.min(...strikes) * 0.7] : []));
   const hi = Math.max(S * Math.exp(w), ...(strikes.length ? [Math.max(...strikes) * 1.3] : []));
   const xs = new Set([S, ...strikes]);
-  for (let i = 0; i <= 300; i++) xs.add(lo + (hi - lo) * i / 300);
+  for (let i = 0; i <= 300; i++) xs.add(lo + ((hi - lo) * i) / 300);
   const grid = [...xs].filter(x => x > 0).sort((a, b) => a - b);
   const atExpiry = grid.map(x => positionPnl(legs, x, horizon, r));
   const today = grid.map(x => positionPnl(legs, x, now, r));
@@ -472,7 +652,8 @@ export function analysePosition(legs, { S, r, now, vol }) {
   // Extremes: check the grid, a stock price of zero, and the slope as the stock runs away upward.
   const atZero = positionPnl(legs, 1e-9, horizon, r);
   const upSlope = Q.sum(legs.filter(l => l.kind !== 'P').map(l => l.side * l.qty * legMult(l)));
-  let maxProfit = Math.max(atZero, ...atExpiry), maxLoss = Math.min(atZero, ...atExpiry);
+  let maxProfit = Math.max(atZero, ...atExpiry),
+    maxLoss = Math.min(atZero, ...atExpiry);
   if (upSlope > 1e-9) maxProfit = Infinity;
   if (upSlope < -1e-9) maxLoss = -Infinity;
 
@@ -485,22 +666,36 @@ export function analysePosition(legs, { S, r, now, vol }) {
   const breakevens = [];
   const pts = [[1e-9, flat(atZero)], ...grid.map((x, i) => [x, flat(atExpiry[i])])];
   for (let i = 1; i < pts.length; i++) {
-    const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+    const [x0, y0] = pts[i - 1],
+      [x1, y1] = pts[i];
     if (Math.sign(y0) === Math.sign(y1)) continue;
-    const x = y0 === 0 ? x0 : y1 === 0 ? x1 : x0 + (x1 - x0) * (0 - y0) / (y1 - y0);
+    const x = y0 === 0 ? x0 : y1 === 0 ? x1 : x0 + ((x1 - x0) * (0 - y0)) / (y1 - y0);
     if (breakevens[breakevens.length - 1] !== x) breakevens.push(x);
   }
   // Chance of profit: add up the lognormal probability of every stretch of prices that makes money.
   const edges = [0, ...breakevens, Infinity];
   let pop = 0;
   for (let i = 1; i < edges.length; i++) {
-    const a = edges[i - 1], b = edges[i];
-    const inside = b === Infinity ? Math.max(a * 1.5, hi * 2) : (a + b) / 2;       // a price inside this stretch, to see whether the stretch makes money
+    const a = edges[i - 1],
+      b = edges[i];
+    // A price inside this stretch, to see whether the stretch makes money.
+    const inside = b === Infinity ? Math.max(a * 1.5, hi * 2) : (a + b) / 2;
     if (flat(positionPnl(legs, Math.max(inside, 1e-9), horizon, r)) > 0)
       pop += (b === Infinity ? 1 : Q.probBelow(b, F, sig, T)) - Q.probBelow(a, F, sig, T);
   }
   return {
-    cost: positionCost(legs), horizon, T, F, vol: sig, grid, atExpiry, today, maxProfit, maxLoss, breakevens, pop,
+    cost: positionCost(legs),
+    horizon,
+    T,
+    F,
+    vol: sig,
+    grid,
+    atExpiry,
+    today,
+    maxProfit,
+    maxLoss,
+    breakevens,
+    pop,
     range: moveRange(F, sig, T),
     greeks: positionGreeks(legs, S, now, r),
   };
@@ -512,7 +707,10 @@ export function pickByDelta(exp, target) {
   if (!pool.length) return null;
   return pool.reduce((a, b) => (Math.abs(b.delta - target) < Math.abs(a.delta - target) ? b : a));
 }
-/** The contract `steps` strikes above (or below, when negative) c on the same side, or null past the last listed strike. */
+/**
+ * The contract `steps` strikes above (or below, when negative) c on the same side,
+ * or null past the last listed strike.
+ */
 const neighbour = (exp, c, steps) => {
   const list = c.put ? exp.puts : exp.calls;
   return list[list.indexOf(c) + steps] || null;
@@ -522,17 +720,85 @@ const neighbour = (exp, c, steps) => {
 export const TEMPLATES = {
   'Long call': { view: 'Bullish', build: e => [[pickByDelta(e, 0.5), 1]] },
   'Long put': { view: 'Bearish', build: e => [[pickByDelta(e, -0.5), 1]] },
-  'Bull call spread': { view: 'Bullish, capped', build: e => [[pickByDelta(e, 0.55), 1], [pickByDelta(e, 0.3), -1]] },
-  'Bear put spread': { view: 'Bearish, capped', build: e => [[pickByDelta(e, -0.55), 1], [pickByDelta(e, -0.3), -1]] },
-  'Bull put spread (credit)': { view: 'Neutral to bullish', build: e => [[pickByDelta(e, -0.3), -1], [pickByDelta(e, -0.15), 1]] },
-  'Bear call spread (credit)': { view: 'Neutral to bearish', build: e => [[pickByDelta(e, 0.3), -1], [pickByDelta(e, 0.15), 1]] },
-  'Long straddle': { view: 'Big move either way', build: e => { const r = e.rows.get(e.atmStrike); return [[r.call, 1], [r.put, 1]]; } },
-  'Long strangle': { view: 'Big move either way, cheaper', build: e => [[pickByDelta(e, 0.25), 1], [pickByDelta(e, -0.25), 1]] },
-  'Iron condor': { view: 'Stays in a range', build: e => { const c = pickByDelta(e, 0.2), p = pickByDelta(e, -0.2); return [[c, -1], [c && neighbour(e, c, 1), 1], [p, -1], [p && neighbour(e, p, -1), 1]]; } },
-  'Call butterfly': { view: 'Pins near a price', build: e => { const m = e.rows.get(e.atmStrike).call; return [[m && neighbour(e, m, -1), 1], [m, -2], [m && neighbour(e, m, 1), 1]]; } },
+  'Bull call spread': {
+    view: 'Bullish, capped',
+    build: e => [
+      [pickByDelta(e, 0.55), 1],
+      [pickByDelta(e, 0.3), -1],
+    ],
+  },
+  'Bear put spread': {
+    view: 'Bearish, capped',
+    build: e => [
+      [pickByDelta(e, -0.55), 1],
+      [pickByDelta(e, -0.3), -1],
+    ],
+  },
+  'Bull put spread (credit)': {
+    view: 'Neutral to bullish',
+    build: e => [
+      [pickByDelta(e, -0.3), -1],
+      [pickByDelta(e, -0.15), 1],
+    ],
+  },
+  'Bear call spread (credit)': {
+    view: 'Neutral to bearish',
+    build: e => [
+      [pickByDelta(e, 0.3), -1],
+      [pickByDelta(e, 0.15), 1],
+    ],
+  },
+  'Long straddle': {
+    view: 'Big move either way',
+    build: e => {
+      const r = e.rows.get(e.atmStrike);
+      return [
+        [r.call, 1],
+        [r.put, 1],
+      ];
+    },
+  },
+  'Long strangle': {
+    view: 'Big move either way, cheaper',
+    build: e => [
+      [pickByDelta(e, 0.25), 1],
+      [pickByDelta(e, -0.25), 1],
+    ],
+  },
+  'Iron condor': {
+    view: 'Stays in a range',
+    build: e => {
+      const c = pickByDelta(e, 0.2),
+        p = pickByDelta(e, -0.2);
+      return [
+        [c, -1],
+        [c && neighbour(e, c, 1), 1],
+        [p, -1],
+        [p && neighbour(e, p, -1), 1],
+      ];
+    },
+  },
+  'Call butterfly': {
+    view: 'Pins near a price',
+    build: e => {
+      const m = e.rows.get(e.atmStrike).call;
+      return [
+        [m && neighbour(e, m, -1), 1],
+        [m, -2],
+        [m && neighbour(e, m, 1), 1],
+      ];
+    },
+  },
   'Covered call': { view: 'Own shares, earn income', stock: 100, build: e => [[pickByDelta(e, 0.3), -1]] },
   'Protective put': { view: 'Own shares, insure them', stock: 100, build: e => [[pickByDelta(e, -0.3), 1]] },
-  'Collar': { view: 'Own shares, cheap insurance', stock: 100, build: e => [[pickByDelta(e, -0.25), 1], [pickByDelta(e, 0.25), -1]] },
+  'Collar': {
+    view: 'Own shares, cheap insurance',
+    stock: 100,
+    build: e => [
+      [pickByDelta(e, -0.25), 1],
+      [pickByDelta(e, 0.25), -1],
+    ],
+  },
   'Cash-secured put': { view: 'Get paid to bid lower', build: e => [[pickByDelta(e, -0.3), -1]] },
 };
 
@@ -540,7 +806,8 @@ export const TEMPLATES = {
 export function buildTemplate(name, exp, S) {
   const t = TEMPLATES[name];
   const picks = t.build(exp);
-  if (picks.some(([c]) => !c) || new Set(picks.map(([c]) => c)).size < picks.length) return [];   // a missing or repeated contract would be a different strategy
+  // A missing or repeated contract would be a different strategy.
+  if (picks.some(([c]) => !c) || new Set(picks.map(([c]) => c)).size < picks.length) return [];
   const legs = picks.map(([c, n]) => legFromContract(c, Math.sign(n), Math.abs(n)));
   if (t.stock) legs.unshift(stockLeg(1, t.stock, S));
   return legs;
@@ -551,36 +818,66 @@ export function buildTemplate(name, exp, S) {
  * really form that strategy; anything else is a "Custom position", never a wrong label.
  */
 export function nameOf(legs) {
-  const o = legs.filter(l => l.kind !== 'S'), stock = legs.find(l => l.kind === 'S');
+  const o = legs.filter(l => l.kind !== 'S'),
+    stock = legs.find(l => l.kind === 'S');
   const word = l => `${l.side > 0 ? 'Long' : 'Short'} ${l.kind === 'C' ? 'call' : 'put'}`;
   if (!o.length) return stock ? `${stock.side > 0 ? 'Long' : 'Short'} stock` : 'Empty position';
-  const sameExpiry = o.every(l => l.close === o[0].close), sameSize = o.every(l => l.qty === o[0].qty);
+  const sameExpiry = o.every(l => l.close === o[0].close),
+    sameSize = o.every(l => l.qty === o[0].qty);
   const byStrikeUp = [...o].sort((a, b) => a.strike - b.strike);
   if (o.length === 1) {
-    if (stock && stock.side > 0) return o[0].kind === 'C' && o[0].side < 0 ? 'Covered call' : o[0].kind === 'P' && o[0].side > 0 ? 'Protective put' : `Stock plus ${word(o[0]).toLowerCase()}`;
+    if (stock && stock.side > 0)
+      return o[0].kind === 'C' && o[0].side < 0
+        ? 'Covered call'
+        : o[0].kind === 'P' && o[0].side > 0
+          ? 'Protective put'
+          : `Stock plus ${word(o[0]).toLowerCase()}`;
     return stock ? 'Custom position' : word(o[0]);
   }
   if (o.length === 2 && sameSize) {
-    const [a, b] = o, long = a.side > 0 ? a : b, short = a.side > 0 ? b : a;
-    if (stock) {        // shares plus a bought put and a sold call
+    const [a, b] = o,
+      long = a.side > 0 ? a : b,
+      short = a.side > 0 ? b : a;
+    if (stock) {
+      // shares plus a bought put and a sold call
       const collar = stock.side > 0 && sameExpiry && a.kind !== b.kind && a.side !== b.side && long.kind === 'P';
       return collar ? 'Collar' : 'Custom position';
     }
     if (a.kind === b.kind && a.side !== b.side && sameExpiry && a.strike !== b.strike) {
-      const bull = long.strike < short.strike;     // true for calls and puts alike
+      const bull = long.strike < short.strike; // true for calls and puts alike
       return `${bull ? 'Bull' : 'Bear'} ${a.kind === 'C' ? 'call' : 'put'} spread (${positionCost(o) > 0 ? 'debit' : 'credit'})`;
     }
     if (a.kind === b.kind && a.side !== b.side && !sameExpiry && a.strike === b.strike) return 'Calendar spread';
-    if (a.kind !== b.kind && a.side === b.side && sameExpiry) return `${a.side > 0 ? 'Long' : 'Short'} ${a.strike === b.strike ? 'straddle' : 'strangle'}`;
+    if (a.kind !== b.kind && a.side === b.side && sameExpiry)
+      return `${a.side > 0 ? 'Long' : 'Short'} ${a.strike === b.strike ? 'straddle' : 'strangle'}`;
   }
   if (o.length === 3 && !stock && sameExpiry && o.every(l => l.kind === o[0].kind)) {
-    const [low, mid, high] = byStrikeUp;           // a butterfly: one wing each side, twice the size in the middle, opposite side
-    if (low.side === high.side && mid.side === -low.side && low.qty === high.qty && mid.qty === 2 * low.qty && low.strike < mid.strike && mid.strike < high.strike)
+    const [low, mid, high] = byStrikeUp; // a butterfly: one wing each side, twice the size in the middle, opposite side
+    if (
+      low.side === high.side &&
+      mid.side === -low.side &&
+      low.qty === high.qty &&
+      mid.qty === 2 * low.qty &&
+      low.strike < mid.strike &&
+      mid.strike < high.strike
+    )
       return `${low.side > 0 ? 'Long' : 'Short'} ${low.kind === 'C' ? 'call' : 'put'} butterfly`;
   }
   if (o.length === 4 && !stock && sameExpiry && sameSize) {
-    const [p1, p2, c1, c2] = byStrikeUp;           // an iron condor: bought put, sold put, sold call, bought call, in strike order
-    if (p1.kind === 'P' && p2.kind === 'P' && c1.kind === 'C' && c2.kind === 'C' && p1.side > 0 && p2.side < 0 && c1.side < 0 && c2.side > 0 && p2.strike < c1.strike) return 'Iron condor';
+    // An iron condor: bought put, sold put, sold call, bought call, in strike order.
+    const [p1, p2, c1, c2] = byStrikeUp;
+    if (
+      p1.kind === 'P' &&
+      p2.kind === 'P' &&
+      c1.kind === 'C' &&
+      c2.kind === 'C' &&
+      p1.side > 0 &&
+      p2.side < 0 &&
+      c1.side < 0 &&
+      c2.side > 0 &&
+      p2.strike < c1.strike
+    )
+      return 'Iron condor';
   }
   return 'Custom position';
 }
@@ -593,5 +890,13 @@ export function validLeg(leg) {
   const num = x => typeof x === 'number' && Number.isFinite(x);
   if (!leg || !['C', 'P', 'S'].includes(leg.kind) || ![1, -1].includes(leg.side)) return false;
   if (!(num(leg.qty) && leg.qty > 0 && num(leg.price) && leg.price >= 0)) return false;
-  return leg.kind === 'S' || (num(leg.strike) && leg.strike > 0 && num(leg.close) && num(leg.sigma) && leg.sigma > 0 && typeof leg.symbol === 'string');
+  return (
+    leg.kind === 'S' ||
+    (num(leg.strike) &&
+      leg.strike > 0 &&
+      num(leg.close) &&
+      num(leg.sigma) &&
+      leg.sigma > 0 &&
+      typeof leg.symbol === 'string')
+  );
 }

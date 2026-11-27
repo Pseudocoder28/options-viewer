@@ -99,7 +99,7 @@ def build():
         "CFBundleExecutable": "launcher", "CFBundleIconFile": "icon",
     }))
     launcher = macos / "launcher"
-    launcher.write_text(LAUNCHER.replace("__PROJECT__", shlex.quote(str(ROOT))))     # quoted, so any folder name is safe
+    launcher.write_text(LAUNCHER.replace("__PROJECT__", shlex.quote(str(ROOT))))  # quoted, so any folder name is safe
     launcher.chmod(0o755)
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -109,8 +109,10 @@ def build():
             for n in (16, 32, 128, 256, 512):
                 for scale in (1, 2):
                     out = iconset / f"icon_{n}x{n}{'@2x' if scale == 2 else ''}.png"
-                    subprocess.run(["sips", "-z", str(n * scale), str(n * scale), str(master), "--out", str(out)], check=True, capture_output=True)
-            subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(resources / "icon.icns")], check=True, capture_output=True)
+                    subprocess.run(["sips", "-z", str(n * scale), str(n * scale), str(master), "--out", str(out)],
+                                   check=True, capture_output=True)
+            subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(resources / "icon.icns")],
+                           check=True, capture_output=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         print(f"Built without a custom icon ({exc}).")
     print(f"Built {APP.name} in {ROOT}\nDouble-click it to start, or drag it to the Dock.")

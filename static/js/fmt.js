@@ -23,10 +23,12 @@ export function pnl(x) {
   if (x === Infinity) return 'Unlimited';
   if (x === -Infinity) return 'Unlimited loss';
   if (!ok(x)) return DASH;
-  const a = Math.abs(x), body = a >= 100 ? num(a, 0) : num(a, 2);
+  const a = Math.abs(x),
+    body = a >= 100 ? num(a, 0) : num(a, 2);
   return (x > 0 ? '+$' : x < 0 ? '-$' : '$') + body;
 }
-export const money = x => (ok(x) ? (x < 0 ? '-$' : '$') + (Math.abs(x) >= 100 ? num(Math.abs(x), 0) : num(Math.abs(x), 2)) : DASH);
+export const money = x =>
+  ok(x) ? (x < 0 ? '-$' : '$') + (Math.abs(x) >= 100 ? num(Math.abs(x), 0) : num(Math.abs(x), 2)) : DASH;
 
 export function strike(x) {
   if (!ok(x)) return DASH;
@@ -40,7 +42,8 @@ export const int = x => num(x, 0);
 /** Implied volatility: whole percent above 20%, one decimal below. */
 export const iv = x => (ok(x) ? num(x * 100, x < 0.2 ? 1 : 0) + '%' : DASH);
 /** Greeks: d decimals, more for very small values so they never print as 0.000. */
-export const greek = (x, d = 3) => (ok(x) ? num(x, x !== 0 && Math.abs(x) < 0.5 * 10 ** -d ? Math.min(d + 3, 7) : d) : DASH);
+export const greek = (x, d = 3) =>
+  ok(x) ? num(x, x !== 0 && Math.abs(x) < 0.5 * 10 ** -d ? Math.min(d + 3, 7) : d) : DASH;
 
 export function compact(x) {
   if (!ok(x)) return DASH;
@@ -59,7 +62,8 @@ export function days(d) {
 }
 
 const dateOf = v => (typeof v === 'string' ? new Date(v + 'T12:00:00Z') : new Date(v * 1000));
-const part = (v, opts, tz) => dateOf(v).toLocaleString('en-US', { timeZone: typeof v === 'string' ? 'UTC' : tz || NY, ...opts });
+const part = (v, opts, tz) =>
+  dateOf(v).toLocaleString('en-US', { timeZone: typeof v === 'string' ? 'UTC' : tz || NY, ...opts });
 /** "Dec 4" from an ISO date or epoch seconds. */
 export const date = v => (v == null ? DASH : part(v, { month: 'short', day: 'numeric' }));
 /** "Dec 4, 2026". */
@@ -72,13 +76,29 @@ export const dateTime = v => (v == null ? DASH : `${date(v)} ${time(v)}`);
 /** Wall-clock timestamp in New York as "YYYY-MM-DD HH:MM" (what the price chart plots, so that
  *  session gaps can be cut out by hour). */
 export function nyStamp(epoch) {
-  const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: NY, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(epoch * 1000)).map(x => [x.type, x.value]));
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: NY,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    })
+      .formatToParts(new Date(epoch * 1000))
+      .map(x => [x.type, x.value]),
+  );
   return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
 }
 
-/** An expiry for a label: "Dec 4", with the year when it is far off and the option root when two series share the date. */
-export const expiryName = e => date(e.date) + (e.days > 300 ? ` '${e.date.slice(2, 4)}` : '') + (e.label !== e.date ? ` ${e.root}` : '');
+/**
+ * An expiry for a label: "Dec 4", with the year when it is far off
+ * and the option root when two series share the date.
+ */
+export const expiryName = e =>
+  date(e.date) + (e.days > 300 ? ` '${e.date.slice(2, 4)}` : '') + (e.label !== e.date ? ` ${e.root}` : '');
 export const contractName = c => `${date(c.exp.date)} ${strike(c.strike)} ${c.put ? 'put' : 'call'}`;
-export const legName = l => (l.kind === 'S' ? 'shares' : `${date(l.date)} ${strike(l.strike)} ${l.kind === 'P' ? 'put' : 'call'}`);
+export const legName = l =>
+  l.kind === 'S' ? 'shares' : `${date(l.date)} ${strike(l.strike)} ${l.kind === 'P' ? 'put' : 'call'}`;
 export const plural = (n, word) => `${int(n)} ${word}${Math.abs(n) === 1 ? '' : 's'}`;

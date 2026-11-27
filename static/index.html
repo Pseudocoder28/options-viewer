@@ -1,33 +1,41 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Options Terminal</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 fill=%27%23ffb000%27/%3E%3Cpath d=%27M3 11l3-4 3 2 4-5%27 stroke=%27%23000%27 stroke-width=%272%27 fill=%27none%27/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/app.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.3/plotly.min.js" defer></script>
-<script type="module" src="/static/js/app.js"></script>
-</head>
-<body>
-<div id="app">
-  <header id="top">
-    <button class="brand" id="brand" title="Overview">OPTIONS TERMINAL</button>
-    <div class="cmd">
-      <span class="prompt">&gt;</span>
-      <input id="cmd" autocomplete="off" spellcheck="false" aria-label="Command line"
-             placeholder="Type a ticker or name: AAPL, SPY, ^SPX, nvidia…  then Enter.  Add a view: SPY CHAIN">
-      <span class="hint">/ to focus</span>
-      <div class="suggest" id="suggest" hidden></div>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Options Terminal</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 fill=%27%23ffb000%27/%3E%3Cpath d=%27M3 11l3-4 3 2 4-5%27 stroke=%27%23000%27 stroke-width=%272%27 fill=%27none%27/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/static/app.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.3/plotly.min.js" defer></script>
+    <script type="module" src="/static/js/app.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <header id="top">
+        <button class="brand" id="brand" title="Overview">OPTIONS TERMINAL</button>
+        <div class="cmd">
+          <span class="prompt">&gt;</span>
+          <input
+            id="cmd"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="Command line"
+            placeholder="Type a ticker or name: AAPL, SPY, ^SPX, nvidia…  then Enter.  Add a view: SPY CHAIN"
+          />
+          <span class="hint">/ to focus</span>
+          <div class="suggest" id="suggest" hidden></div>
+        </div>
+        <div class="topbtns" id="topbtns"></div>
+      </header>
+      <nav id="tabs" aria-label="Views"></nav>
+      <div id="watch"></div>
+      <section id="quote" aria-live="polite"></section>
+      <main id="view"><div class="empty">Starting up…</div></main>
+      <footer id="status"></footer>
     </div>
-    <div class="topbtns" id="topbtns"></div>
-  </header>
-  <nav id="tabs" aria-label="Views"></nav>
-  <div id="watch"></div>
-  <section id="quote" aria-live="polite"></section>
-  <main id="view"><div class="empty">Starting up…</div></main>
-  <footer id="status"></footer>
-</div>
-<noscript>Options Terminal needs JavaScript.</noscript>
-</body>
+    <noscript>Options Terminal needs JavaScript.</noscript>
+  </body>
 </html>

@@ -11,7 +11,25 @@
 import * as M from './model.js';
 import * as Q from './quant.js';
 import * as F from './fmt.js';
-import { h, mount, append, initTips, openModal, closeModal, modalOpen, purgePlots, store as disk, btn, seg, tone, check, empty, skeleton, keepFocus, flash } from './ui.js';
+import {
+  h,
+  mount,
+  append,
+  initTips,
+  openModal,
+  closeModal,
+  modalOpen,
+  purgePlots,
+  store as disk,
+  btn,
+  seg,
+  tone,
+  check,
+  empty,
+  skeleton,
+  keepFocus,
+  flash,
+} from './ui.js';
 import { TERMS } from './glossary.js';
 import { anchorExpiry } from './explain.js';
 import * as market from './views-market.js';
@@ -32,127 +50,266 @@ const VIEWS = [
 ];
 // Words that switch view. Short codes only count after a ticker ("SPY OC"), so that real tickers
 // such as PL or OC still load when typed on their own.
-const WORDS = { OVERVIEW: 'overview', PRICE: 'price', CHAIN: 'chain', VOLATILITY: 'vol', STRATEGY: 'strategy', CALCULATOR: 'calc', LEARN: 'learn' };
-const CODES = { ...WORDS, OV: 'overview', DES: 'overview', GP: 'price', CHART: 'price', OC: 'chain', OMON: 'chain', VOL: 'vol', SKEW: 'vol', SURF: 'vol',
-                OI: 'oi', FLOW: 'oi', GEX: 'oi', STRAT: 'strategy', PL: 'strategy', CALC: 'calc', EDU: 'learn' };
+const WORDS = {
+  OVERVIEW: 'overview',
+  PRICE: 'price',
+  CHAIN: 'chain',
+  VOLATILITY: 'vol',
+  STRATEGY: 'strategy',
+  CALCULATOR: 'calc',
+  LEARN: 'learn',
+};
+const CODES = {
+  ...WORDS,
+  OV: 'overview',
+  DES: 'overview',
+  GP: 'price',
+  CHART: 'price',
+  OC: 'chain',
+  OMON: 'chain',
+  VOL: 'vol',
+  SKEW: 'vol',
+  SURF: 'vol',
+  OI: 'oi',
+  FLOW: 'oi',
+  GEX: 'oi',
+  STRAT: 'strategy',
+  PL: 'strategy',
+  CALC: 'calc',
+  EDU: 'learn',
+};
 const DEFAULT_WATCH = ['SPY', 'QQQ', 'IWM', '^SPX', '^VIX', 'AAPL', 'NVDA', 'TSLA'];
-const MAX_WATCH = 40;        // the server prices at most this many tickers in one request
-const TEXT_SIZES = [[1, 'A', 'Normal text'], [1.12, 'A', 'Larger text'], [1.25, 'A', 'Largest text']];
-const FRESH_MS = 55000;      // a ticker loaded more recently than this is shown without asking the server again
-const KEEP_TICKERS = 6;      // how many recent tickers stay in memory, ready to show at once
+const MAX_WATCH = 40; // the server prices at most this many tickers in one request
+const TEXT_SIZES = [
+  [1, 'A', 'Normal text'],
+  [1.12, 'A', 'Larger text'],
+  [1.25, 'A', 'Largest text'],
+];
+const FRESH_MS = 55000; // a ticker loaded more recently than this is shown without asking the server again
+const KEEP_TICKERS = 6; // how many recent tickers stay in memory, ready to show at once
 const $ = id => document.getElementById(id);
 
 // ---------------------------------------------------------------- saved settings
 // Everything the app keeps in the browser is read through stored(). A value of the wrong shape
 // (damaged storage, or one left by an older version) falls back to its default instead of breaking the page.
 const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
-const isTicker = v => typeof v === 'string' && /^[A-Z0-9.^=-]{1,20}$/.test(v);     // the same rule the server applies
-const stored = (key, fallback, valid) => { const v = disk.get(key, fallback); return valid(v) ? v : fallback; };
+const isTicker = v => typeof v === 'string' && /^[A-Z0-9.^=-]{1,20}$/.test(v); // the same rule the server applies
+const stored = (key, fallback, valid) => {
+  const v = disk.get(key, fallback);
+  return valid(v) ? v : fallback;
+};
 const cleanLegs = legs => (Array.isArray(legs) ? legs.filter(M.validLeg) : []);
 
 export const app = {
   // --- what is on screen
-  symbol: null, quote: null, chain: null, chainError: null, hv: null, hist: {}, loadedAt: 0,
-  view: 'overview', expiry: null, selected: null,
+  symbol: null,
+  quote: null,
+  chain: null,
+  chainError: null,
+  hv: null,
+  hist: {},
+  loadedAt: 0,
+  view: 'overview',
+  expiry: null,
+  selected: null,
   // --- loading
-  loading: false,        // a request is in flight (drives the progress bar)
-  pending: null,         // ticker that was asked for but has no data yet (drives the placeholders)
-  chainLoading: false,   // the price is in, the option chain is still on its way
-  want: null,            // { exp, c, legs } from the address bar, applied once the chain is there
-  error: null, failed: null,   // the message of a load that failed, and the ticker it was for (RETRY loads it again)
-  refreshFailed: false,  // the latest refresh of the ticker on screen failed, so its numbers are getting old
-  message: null,         // the latest status-bar message: { text, isError, at }
+  loading: false, // a request is in flight (drives the progress bar)
+  pending: null, // ticker that was asked for but has no data yet (drives the placeholders)
+  chainLoading: false, // the price is in, the option chain is still on its way
+  want: null, // { exp, c, legs } from the address bar, applied once the chain is there
+  error: null,
+  failed: null, // the message of a load that failed, and the ticker it was for (RETRY loads it again)
+  refreshFailed: false, // the latest refresh of the ticker on screen failed, so its numbers are getting old
+  message: null, // the latest status-bar message: { text, isError, at }
   // --- kept in the browser between visits
-  ui: stored('ui', {}, isObj),                                    // per-view settings, see ctx.prefs
+  ui: stored('ui', {}, isObj), // per-view settings, see ctx.prefs
   watch: stored('watch', DEFAULT_WATCH, Array.isArray).filter(isTicker).slice(0, MAX_WATCH),
   watchQuotes: {},
-  legs: Object.fromEntries(Object.entries(stored('legs', {}, isObj)).map(([symbol, legs]) => [symbol, cleanLegs(legs)])),   // strategy legs per ticker
-  saved: stored('saved', [], Array.isArray).filter(s => isObj(s) && isTicker(s.symbol))                                    // saved positions
-    .map(s => ({ ...s, name: String(s.name ?? s.symbol), legs: cleanLegs(s.legs) })).filter(s => s.legs.length),
+  legs: Object.fromEntries(
+    Object.entries(stored('legs', {}, isObj)).map(([symbol, legs]) => [symbol, cleanLegs(legs)]),
+  ), // strategy legs per ticker
+  saved: stored('saved', [], Array.isArray)
+    .filter(s => isObj(s) && isTicker(s.symbol)) // saved positions
+    .map(s => ({ ...s, name: String(s.name ?? s.symbol), legs: cleanLegs(s.legs) }))
+    .filter(s => s.legs.length),
   lesson: stored('lesson', 'basics', v => typeof v === 'string'),
-  done: stored('done', {}, isObj),                                // lessons marked as read
+  done: stored('done', {}, isObj), // lessons marked as read
   autoRefresh: stored('auto', true, v => typeof v === 'boolean'),
-  text: stored('text', 1, v => TEXT_SIZES.some(size => size[0] === v)),   // text size multiplier (the A A A control)
+  text: stored('text', 1, v => TEXT_SIZES.some(size => size[0] === v)), // text size multiplier (the A A A control)
 };
-const recent = new Map();     // ticker -> { quote, chain, chainError, hv, loadedAt, expiry }
-let loadToken = 0, rerenderTimer = 0;
+const recent = new Map(); // ticker -> { quote, chain, chainError, hv, loadedAt, expiry }
+let loadToken = 0,
+  rerenderTimer = 0;
 
 async function api(path) {
   let res;
-  try { res = await fetch(path); } catch { throw new Error('Cannot reach the local data server. Open the Options Terminal app again (or run "uv run server.py") to restart it.'); }
+  try {
+    res = await fetch(path);
+  } catch {
+    throw new Error(
+      'Cannot reach the local data server. Open the Options Terminal app again (or run "uv run server.py") to restart it.',
+    );
+  }
   const body = await res.json().catch(() => ({ error: 'The server sent something unreadable.' }));
   if (!res.ok || body.error) throw new Error(body.error || res.statusText);
   return body;
 }
 
 const ctx = {
-  app, api,
+  app,
+  api,
   /**
-   * Per-view settings that survive re-renders and reloads: prefs('chain', { cols: 'basic' }, { cols: ['basic', 'greeks'] }).
+   * Per-view settings that survive re-renders and reloads:
+   *   prefs('chain', { cols: 'basic' }, { cols: ['basic', 'greeks'] })
    * A saved value is kept only when it has the type of its default and, where a list of choices is
    * given, is one of them. Anything else falls back to the default, so a value left by an older
    * version can never break a view.
    */
   prefs(view, defaults, choices = {}) {
     const kept = Object.entries(isObj(app.ui[view]) ? app.ui[view] : {}).filter(([key, value]) => {
-      if (!(key in defaults) || defaults[key] === null) return true;            // nothing to compare with
+      if (!(key in defaults) || defaults[key] === null) return true; // nothing to compare with
       const sameType = typeof value === typeof defaults[key] && Array.isArray(value) === Array.isArray(defaults[key]);
       return sameType && (!choices[key] || choices[key].includes(value));
     });
     return (app.ui[view] = { ...defaults, ...Object.fromEntries(kept) });
   },
-  savePrefs() { disk.set('ui', app.ui); },
+  savePrefs() {
+    disk.set('ui', app.ui);
+  },
   /** Switch view. Each switch is a step the Back button can undo. */
-  go(view) { dropOldError(); if (app.view !== view) { app.view = view; syncUrl(true); } render(); scrollTo(0, 0); },
+  go(view) {
+    dropOldError();
+    if (app.view !== view) {
+      app.view = view;
+      syncUrl(true);
+    }
+    render();
+    scrollTo(0, 0);
+  },
   load: (symbol, view) => navigate(symbol, view),
   render: () => render(),
   /** Redraw the view on the next tick, so a Tab or click that caused the change lands first and focus is kept. */
-  rerenderView() { clearTimeout(rerenderTimer); rerenderTimer = setTimeout(renderView, 0); },
+  rerenderView() {
+    clearTimeout(rerenderTimer);
+    rerenderTimer = setTimeout(renderView, 0);
+  },
   expiry: () => app.chain?.expiries.find(e => e.label === app.expiry) || null,
-  setExpiry(label) { app.expiry = label; app.selected = null; syncUrl(); render(); },
+  setExpiry(label) {
+    app.expiry = label;
+    app.selected = null;
+    syncUrl();
+    render();
+  },
   contract: () => app.chain?.contracts.find(c => c.id === app.selected) || null,
-  select(c) { app.selected = c ? c.id : null; if (c) app.expiry = c.exp.label; syncUrl(); renderView(); },
+  select(c) {
+    app.selected = c ? c.id : null;
+    if (c) app.expiry = c.exp.label;
+    syncUrl();
+    renderView();
+  },
   legs: () => app.legs[app.symbol] || [],
-  setLegs(legs) { app.legs[app.symbol] = legs; disk.set('legs', app.legs); syncUrl(); },
-  addLeg(c, side, qty = 1) { ctx.setLegs([...ctx.legs(), M.legFromContract(c, side, qty)]); ctx.status(`Added to strategy: ${side > 0 ? 'buy' : 'sell'} ${qty} × ${F.contractName(c)}`); },
+  setLegs(legs) {
+    app.legs[app.symbol] = legs;
+    disk.set('legs', app.legs);
+    syncUrl();
+  },
+  addLeg(c, side, qty = 1) {
+    ctx.setLegs([...ctx.legs(), M.legFromContract(c, side, qty)]);
+    ctx.status(`Added to strategy: ${side > 0 ? 'buy' : 'sell'} ${qty} × ${F.contractName(c)}`);
+  },
   saved: () => app.saved,
-  setSaved(list) { app.saved = list; disk.set('saved', list); },
+  setSaved(list) {
+    app.saved = list;
+    disk.set('saved', list);
+  },
   openSaved(s) {
-    app.legs[s.symbol] = s.legs.map(l => ({ ...l })); disk.set('legs', app.legs);
+    app.legs[s.symbol] = s.legs.map(l => ({ ...l }));
+    disk.set('legs', app.legs);
     navigate(s.symbol, 'strategy');
   },
-  openLesson(id) { app.lesson = id; disk.set('lesson', id); if (app.view === 'learn') ctx.setLesson(id); else ctx.go('learn'); },
-  markDone(id) { app.done[id] = true; disk.set('done', app.done); },
-  setLesson(id) { app.lesson = id; disk.set('lesson', id); syncUrl(true); renderView(); scrollTo(0, 0); },
-  status(text, isError = false) { app.message = { text, isError, at: Date.now() }; renderStatus(); },
+  openLesson(id) {
+    app.lesson = id;
+    disk.set('lesson', id);
+    if (app.view === 'learn') ctx.setLesson(id);
+    else ctx.go('learn');
+  },
+  markDone(id) {
+    app.done[id] = true;
+    disk.set('done', app.done);
+  },
+  setLesson(id) {
+    app.lesson = id;
+    disk.set('lesson', id);
+    syncUrl(true);
+    renderView();
+    scrollTo(0, 0);
+  },
+  status(text, isError = false) {
+    app.message = { text, isError, at: Date.now() };
+    renderStatus();
+  },
   async history(range) {
-    const key = `${app.symbol}|${range}`, hit = app.hist[key];
+    const key = `${app.symbol}|${range}`,
+      hit = app.hist[key];
     if (hit && Date.now() - hit.at < 60000) return hit.data;
     const data = await api(`/api/history?symbol=${encodeURIComponent(app.symbol)}&range=${range}`);
     app.hist[key] = { at: Date.now(), data };
     return data;
   },
   year: () => app.hist[`${app.symbol}|1Y`]?.data || null,
-  /** What a view that needs the chain shows without one: a placeholder while it loads, the reason when there is none. */
-  noChain: () => (app.chainLoading ? skeleton('Loading the option chain…', 8)
-    : app.chainError ? empty(app.chainError, '  ', btn('RETRY', () => load(app.symbol), '', 'Ask for the option chain again'))
-    : empty(`No options are listed for ${app.symbol} on the free data sources (crypto, futures, funds and many foreign shares have none there). The price views still work.`)),
+  /**
+   * What a view that needs the chain shows without one: a placeholder while it loads,
+   * the reason when there is none.
+   */
+  noChain: () =>
+    app.chainLoading
+      ? skeleton('Loading the option chain…', 8)
+      : app.chainError
+        ? empty(
+            app.chainError,
+            '  ',
+            btn('RETRY', () => load(app.symbol), '', 'Ask for the option chain again'),
+          )
+        : empty(
+            `No options are listed for ${app.symbol} on the free data sources (crypto, futures, funds and many foreign shares have none there). The price views still work.`,
+          ),
 };
 
 // ---------------------------------------------------------------- loading
 
 /** Put a remembered ticker on screen. */
 function show(symbol, snap) {
-  Object.assign(app, { symbol, quote: snap.quote, chain: snap.chain, chainError: snap.chainError, hv: snap.hv, loadedAt: snap.loadedAt,
-                       expiry: snap.expiry ?? null, selected: null, error: null, failed: null, refreshFailed: false, pending: null, chainLoading: false });
+  Object.assign(app, {
+    symbol,
+    quote: snap.quote,
+    chain: snap.chain,
+    chainError: snap.chainError,
+    hv: snap.hv,
+    loadedAt: snap.loadedAt,
+    expiry: snap.expiry ?? null,
+    selected: null,
+    error: null,
+    failed: null,
+    refreshFailed: false,
+    pending: null,
+    chainLoading: false,
+  });
   pickExpiry();
 }
 function pickExpiry() {
-  if (app.chain && !ctx.expiry()) app.expiry = (app.chain.expiries.find(e => e.days >= 2) || app.chain.expiries[0]).label;
+  if (app.chain && !ctx.expiry())
+    app.expiry = (app.chain.expiries.find(e => e.days >= 2) || app.chain.expiries[0]).label;
 }
 function remember() {
   recent.delete(app.symbol);
-  recent.set(app.symbol, { quote: app.quote, chain: app.chain, chainError: app.chainError, hv: app.hv, loadedAt: app.loadedAt, expiry: app.expiry });
+  recent.set(app.symbol, {
+    quote: app.quote,
+    chain: app.chain,
+    chainError: app.chainError,
+    hv: app.hv,
+    loadedAt: app.loadedAt,
+    expiry: app.expiry,
+  });
   while (recent.size > KEEP_TICKERS) recent.delete(recent.keys().next().value);
 }
 /** Apply what the address bar asked for (an expiry, a contract, strategy legs) once the chain is there. */
@@ -161,10 +318,15 @@ function applyWants() {
   if (!w || !app.chain) return;
   app.want = null;
   const c = w.c && app.chain.contracts.find(x => x.symbol === w.c);
-  if (c) { app.selected = c.id; app.expiry = c.exp.label; }
-  else if (w.exp && app.chain.expiries.some(e => e.label === w.exp)) app.expiry = w.exp;
+  if (c) {
+    app.selected = c.id;
+    app.expiry = c.exp.label;
+  } else if (w.exp && app.chain.expiries.some(e => e.label === w.exp)) app.expiry = w.exp;
   const legs = w.legs ? M.decodeLegs(w.legs, app.chain) : [];
-  if (legs.length) { app.legs[app.symbol] = legs; disk.set('legs', app.legs); }
+  if (legs.length) {
+    app.legs[app.symbol] = legs;
+    disk.set('legs', app.legs);
+  }
 }
 
 /**
@@ -179,15 +341,23 @@ async function load(symbol, { quiet = false } = {}) {
     if (leaving) leaving.expiry = app.expiry;
     const snap = recent.get(symbol);
     if (snap) {
-      app.message = null;       // "GEMI loaded" must not linger under another ticker
-      show(symbol, snap); applyWants(); disk.set('last', symbol); syncUrl(); render();
-      if (Date.now() - snap.loadedAt < FRESH_MS) { app.loading = false; return renderChrome(); }
+      app.message = null; // "GEMI loaded" must not linger under another ticker
+      show(symbol, snap);
+      applyWants();
+      disk.set('last', symbol);
+      syncUrl();
+      render();
+      if (Date.now() - snap.loadedAt < FRESH_MS) {
+        app.loading = false;
+        return renderChrome();
+      }
       quiet = true;
     } else app.pending = symbol;
   }
   app.loading = true;
   if (!quiet) ctx.status(`Loading ${symbol}…`);
-  if (app.pending) render(); else renderChrome();
+  if (app.pending) render();
+  else renderChrome();
 
   const q = encodeURIComponent(symbol);
   const chainReq = api('/api/chain?symbol=' + q).catch(e => ({ error: e.message }));
@@ -195,8 +365,21 @@ async function load(symbol, { quiet = false } = {}) {
   try {
     const quote = await api('/api/quote?symbol=' + q);
     if (token !== loadToken) return;
-    if (app.pending) {      // the price is in: show it now, the chain usually lands a moment later
-      Object.assign(app, { symbol, quote, chain: null, chainError: null, hv: null, expiry: null, selected: null, error: null, failed: null, pending: null, chainLoading: true });
+    if (app.pending) {
+      // the price is in: show it now, the chain usually lands a moment later
+      Object.assign(app, {
+        symbol,
+        quote,
+        chain: null,
+        chainError: null,
+        hv: null,
+        expiry: null,
+        selected: null,
+        error: null,
+        failed: null,
+        pending: null,
+        chainLoading: true,
+      });
       render();
     }
     const [raw, year] = await Promise.all([chainReq, yearReq]);
@@ -204,20 +387,40 @@ async function load(symbol, { quiet = false } = {}) {
     const chain = raw.error || !raw.rows.length ? null : M.buildChain(raw, quote);
     if (year) app.hist[`${symbol}|1Y`] = { at: Date.now(), data: year };
     Object.assign(app, {
-      symbol, quote, chain: chain?.expiries.length ? chain : null, chainError: raw.error || null, loadedAt: Date.now(),
-      error: null, failed: null, refreshFailed: false, chainLoading: false,
-      hv: year ? { d10: Q.realizedVol(year.c, 10), d20: Q.realizedVol(year.c, 20), d60: Q.realizedVol(year.c, 60), d250: Q.realizedVol(year.c, Math.min(250, year.c.length - 1)) } : null,
+      symbol,
+      quote,
+      chain: chain?.expiries.length ? chain : null,
+      chainError: raw.error || null,
+      loadedAt: Date.now(),
+      error: null,
+      failed: null,
+      refreshFailed: false,
+      chainLoading: false,
+      hv: year
+        ? {
+            d10: Q.realizedVol(year.c, 10),
+            d20: Q.realizedVol(year.c, 20),
+            d60: Q.realizedVol(year.c, 60),
+            d250: Q.realizedVol(year.c, Math.min(250, year.c.length - 1)),
+          }
+        : null,
     });
-    pickExpiry(); applyWants(); remember();
+    pickExpiry();
+    applyWants();
+    remember();
     disk.set('last', symbol);
     if (!quiet) ctx.status(`${symbol} loaded`);
   } catch (e) {
     if (token !== loadToken) return;
-    if (symbol === app.symbol) app.refreshFailed = true;                          // the screen keeps its older numbers
+    if (symbol === app.symbol) app.refreshFailed = true; // the screen keeps its older numbers
     if (!quiet || !app.quote) Object.assign(app, { error: e.message, failed: symbol });
     ctx.status(e.message, true);
   } finally {
-    if (token === loadToken) { Object.assign(app, { loading: false, pending: null, chainLoading: false }); syncUrl(); render(); }
+    if (token === loadToken) {
+      Object.assign(app, { loading: false, pending: null, chainLoading: false });
+      syncUrl();
+      render();
+    }
   }
 }
 
@@ -227,12 +430,16 @@ async function refreshWatch() {
     const { quotes } = await api('/api/quotes?symbols=' + app.watch.map(encodeURIComponent).join(','));
     for (const q of quotes) app.watchQuotes[q.symbol] = q;
     renderWatch();
-  } catch { /* the strip keeps its last values */ }
+  } catch {
+    /* the strip keeps its last values */
+  }
 }
 
 // ---------------------------------------------------------------- routing
 // The address holds everything needed to come back to a screen:
-//   #/GEMI/chain?c=GEMI261204P00002000      #/SPY/oi?exp=2026-12-18      #/GEMI/strategy?legs=12xGEMI261204P00002000@0.4
+//   #/GEMI/chain?c=GEMI261204P00002000
+//   #/SPY/oi?exp=2026-12-18
+//   #/GEMI/strategy?legs=12xGEMI261204P00002000@0.4
 // Changing view, ticker or lesson adds a step for the Back button; refining a screen (expiry, contract, legs) does not.
 
 function parseHash() {
@@ -240,10 +447,20 @@ function parseHash() {
   const [, sym = '', view] = path.split('/');
   const q = new URLSearchParams(query);
   let symbol = null;
-  try { symbol = decodeURIComponent(sym).trim().toUpperCase(); } catch { /* a mangled address: fall back to the ticker on screen */ }
+  try {
+    symbol = decodeURIComponent(sym).trim().toUpperCase();
+  } catch {
+    /* a mangled address: fall back to the ticker on screen */
+  }
   const id = view?.toLowerCase();
-  return { symbol: isTicker(symbol) ? symbol : null, view: VIEWS.some(v => v.id === id) ? id : null,
-           exp: q.get('exp'), c: q.get('c'), legs: q.get('legs'), lesson: q.get('lesson') };
+  return {
+    symbol: isTicker(symbol) ? symbol : null,
+    view: VIEWS.some(v => v.id === id) ? id : null,
+    exp: q.get('exp'),
+    c: q.get('c'),
+    legs: q.get('legs'),
+    lesson: q.get('lesson'),
+  };
 }
 function buildHash() {
   const q = new URLSearchParams();
@@ -267,47 +484,99 @@ function navigate(symbol, view) {
   symbol = symbol.toUpperCase();
   if (view) app.view = view;
   app.want = null;
-  if (symbol === app.symbol && !app.pending) { syncUrl(true); render(); return Promise.resolve(); }
+  if (symbol === app.symbol && !app.pending) {
+    syncUrl(true);
+    render();
+    return Promise.resolve();
+  }
   history.pushState(null, '', `#/${encodeURIComponent(symbol)}/${app.view}`);
   return load(symbol);
 }
 /** The address changed under us: Back, Forward, or an edit in the address bar. */
 function applyUrl() {
-  if (location.hash === buildHash()) return;          // the page already shows this address
+  if (location.hash === buildHash()) return; // the page already shows this address
   const u = parseHash();
   if (u.view) app.view = u.view;
   if (u.lesson) app.lesson = u.lesson;
   app.want = { exp: u.exp, c: u.c, legs: u.legs };
   if (u.symbol && u.symbol !== app.symbol) return load(u.symbol);
   app.selected = null;
-  dropOldError(); applyWants(); syncUrl(); render();
+  dropOldError();
+  applyWants();
+  syncUrl();
+  render();
 }
 
 // ---------------------------------------------------------------- chrome
 
 function renderTabs() {
   const q = app.pending ? null : app.quote;
-  mount($('tabs'),
-    VIEWS.map((v, i) => h('button', { class: v.id === app.view ? 'on' : '', key: 'tab:' + v.id, onclick: () => ctx.go(v.id) }, h('span', { class: 'key' }, i + 1), v.label)),
+  mount(
+    $('tabs'),
+    VIEWS.map((v, i) =>
+      h(
+        'button',
+        { class: v.id === app.view ? 'on' : '', key: 'tab:' + v.id, onclick: () => ctx.go(v.id) },
+        h('span', { class: 'key' }, i + 1),
+        v.label,
+      ),
+    ),
     // The ticker and its price, shown by the stylesheet once the quote bar has scrolled out of sight.
-    q ? h('button', { id: 'mini', key: 'mini', tiptext: 'Back to the top', onclick: () => scrollTo(0, 0) },
-      h('b', null, q.symbol), h('span', null, F.price(q.price)), h('span', { class: tone(q.changePct) }, F.signedPct(q.changePct / 100))) : null);
+    q
+      ? h(
+          'button',
+          { id: 'mini', key: 'mini', tiptext: 'Back to the top', onclick: () => scrollTo(0, 0) },
+          h('b', null, q.symbol),
+          h('span', null, F.price(q.price)),
+          h('span', { class: tone(q.changePct) }, F.signedPct(q.changePct / 100)),
+        )
+      : null,
+  );
 }
 
 function renderQuote() {
-  const q = app.quote, el = $('quote');
-  if (app.pending) return mount(el, h('span', { class: 'sym' }, app.pending), h('span', { class: 'skel-inline' }), h('span', { class: 'skel-inline short' }), h('span', { class: 'skel-inline short' }));
+  const q = app.quote,
+    el = $('quote');
+  if (app.pending)
+    return mount(
+      el,
+      h('span', { class: 'sym' }, app.pending),
+      h('span', { class: 'skel-inline' }),
+      h('span', { class: 'skel-inline short' }),
+      h('span', { class: 'skel-inline short' }),
+    );
   if (!q) return mount(el, h('span', { class: 'muted' }, 'No security loaded.'));
-  const c = app.chain, e = c && anchorExpiry(c), wait = app.chainLoading;
-  const state = { REGULAR: ['OPEN', 'open'], PRE: ['PRE-MARKET', 'warn'], POST: ['AFTER HOURS', 'warn'], POSTPOST: ['CLOSED', 'closed'], PREPRE: ['CLOSED', 'closed'], CLOSED: ['CLOSED', 'closed'] }[q.marketState] || [q.marketState || '', 'closed'];
+  const c = app.chain,
+    e = c && anchorExpiry(c),
+    wait = app.chainLoading;
+  const state = {
+    REGULAR: ['OPEN', 'open'],
+    PRE: ['PRE-MARKET', 'warn'],
+    POST: ['AFTER HOURS', 'warn'],
+    POSTPOST: ['CLOSED', 'closed'],
+    PREPRE: ['CLOSED', 'closed'],
+    CLOSED: ['CLOSED', 'closed'],
+  }[q.marketState] || [q.marketState || '', 'closed'];
   const block = (label, value, tip) => h('div', { class: 'q' }, h('span', { tip }, label), h('span', null, value));
   const watched = app.watch.includes(q.symbol);
-  mount(el,
+  mount(
+    el,
     h('span', { class: 'sym' }, q.symbol),
     h('span', { class: 'name' }, q.name, h('span', { class: 'muted' }, `  ${q.exchange} · ${q.type}`)),
     flash(h('span', { class: 'px' }, F.price(q.price)), 'quote:' + q.symbol, q.price),
-    h('span', { class: tone(q.change) }, `${F.signed(q.change, q.price < 10 ? 3 : 2)} (${F.signedPct(q.changePct / 100)})`),
-    q.extPrice && state[1] === 'warn' ? h('span', { class: 'muted' }, `${state[0].toLowerCase()} ${F.price(q.extPrice)} `, h('span', { class: tone(q.extChangePct) }, F.signedPct(q.extChangePct / 100))) : null,
+    h(
+      'span',
+      { class: tone(q.change) },
+      `${F.signed(q.change, q.price < 10 ? 3 : 2)} (${F.signedPct(q.changePct / 100)})`,
+    ),
+    q.extPrice && state[1] === 'warn'
+      ? h(
+          'span',
+          { class: 'muted' },
+          `${state[0].toLowerCase()} ${F.price(q.extPrice)} `,
+          h('span', { class: tone(q.extChangePct) }, F.signedPct(q.extChangePct / 100)),
+        )
+      : null,
     state[0] ? h('span', { class: 'badge ' + state[1] }, state[0]) : null,
     block('Day range', `${F.price(q.dayLow)} – ${F.price(q.dayHigh)}`),
     block('52-week', `${F.price(q.yearLow)} – ${F.price(q.yearHigh)}`),
@@ -316,81 +585,235 @@ function renderQuote() {
     // While the chain is on its way these keep their place, so the bar does not jump when it lands.
     c || wait ? block('IV 30d', c ? F.iv(c.iv30) : '…', 'iv') : null,
     app.hv?.d20 != null || wait ? block('Realized 20d', wait ? '…' : F.iv(app.hv.d20), 'hv') : null,
-    e || wait ? block(e ? `Exp. move ${F.date(e.date)}` : 'Exp. move', e ? `±${F.usd(e.em)} (${F.pct(e.em / e.F)})` : '…', 'em') : null,
-    h('button', { class: 'star', key: 'star', tiptext: watched ? 'Remove from the watch strip' : 'Add to the watch strip', onclick: () => {
-      if (!watched && app.watch.length >= MAX_WATCH) return ctx.status(`The watch strip holds ${MAX_WATCH} tickers. Remove one first.`, true);
-      app.watch = watched ? app.watch.filter(s => s !== q.symbol) : [...app.watch, q.symbol];
-      disk.set('watch', app.watch); keepFocus(() => { renderQuote(); renderWatch(); }); refreshWatch();
-    } }, watched ? '★ WATCHING' : '☆ WATCH'));
+    e || wait
+      ? block(e ? `Exp. move ${F.date(e.date)}` : 'Exp. move', e ? `±${F.usd(e.em)} (${F.pct(e.em / e.F)})` : '…', 'em')
+      : null,
+    h(
+      'button',
+      {
+        class: 'star',
+        key: 'star',
+        tiptext: watched ? 'Remove from the watch strip' : 'Add to the watch strip',
+        onclick: () => {
+          if (!watched && app.watch.length >= MAX_WATCH)
+            return ctx.status(`The watch strip holds ${MAX_WATCH} tickers. Remove one first.`, true);
+          app.watch = watched ? app.watch.filter(s => s !== q.symbol) : [...app.watch, q.symbol];
+          disk.set('watch', app.watch);
+          keepFocus(() => {
+            renderQuote();
+            renderWatch();
+          });
+          refreshWatch();
+        },
+      },
+      watched ? '★ WATCHING' : '☆ WATCH',
+    ),
+  );
 }
 
 function renderWatch() {
   const current = app.pending || app.symbol;
-  mount($('watch'), h('span', { class: 'label' }, 'WATCH'), app.watch.map(sym => {
-    const q = app.watchQuotes[sym];
-    return h('button', { class: 'w' + (sym === current ? ' on' : ''), key: 'watch:' + sym, onclick: () => ctx.load(sym) },
-      h('b', null, sym.replace('^', '')), flash(h('span', null, q?.price != null ? F.price(q.price) : '…'), 'watch:' + sym, q?.price),
-      q?.changePct != null ? h('span', { class: tone(q.changePct) }, F.signedPct(q.changePct / 100, 1)) : null,
-      h('span', { class: 'x', tiptext: 'Remove', onclick: ev => { ev.stopPropagation(); app.watch = app.watch.filter(s => s !== sym); disk.set('watch', app.watch); renderWatch(); renderQuote(); } }, '✕'));
-  }));
+  mount(
+    $('watch'),
+    h('span', { class: 'label' }, 'WATCH'),
+    app.watch.map(sym => {
+      const q = app.watchQuotes[sym];
+      return h(
+        'button',
+        { class: 'w' + (sym === current ? ' on' : ''), key: 'watch:' + sym, onclick: () => ctx.load(sym) },
+        h('b', null, sym.replace('^', '')),
+        flash(h('span', null, q?.price != null ? F.price(q.price) : '…'), 'watch:' + sym, q?.price),
+        q?.changePct != null ? h('span', { class: tone(q.changePct) }, F.signedPct(q.changePct / 100, 1)) : null,
+        h(
+          'span',
+          {
+            class: 'x',
+            tiptext: 'Remove',
+            onclick: ev => {
+              ev.stopPropagation();
+              app.watch = app.watch.filter(s => s !== sym);
+              disk.set('watch', app.watch);
+              renderWatch();
+              renderQuote();
+            },
+          },
+          '✕',
+        ),
+      );
+    }),
+  );
 }
 
 function renderStatus() {
-  const c = app.chain, m = app.message, fresh = m && Date.now() - m.at < 8000;
-  mount($('status'),
+  const c = app.chain,
+    m = app.message,
+    fresh = m && Date.now() - m.at < 8000;
+  mount(
+    $('status'),
     app.loading ? h('span', null, h('span', { class: 'spin' }), ' loading') : null,
     c ? h('span', null, `Chain: ${c.source}`, c.stale ? ' (cached, source unreachable)' : '') : null,
     h('span', null, 'Quotes: Yahoo'),
-    h('span', { tiptext: 'Free data feeds are delayed by about 15 minutes. Do not use these prices to time an order.' }, '≈15 min delayed'),
+    h(
+      'span',
+      { tiptext: 'Free data feeds are delayed by about 15 minutes. Do not use these prices to time an order.' },
+      '≈15 min delayed',
+    ),
     app.loadedAt ? h('span', null, 'Updated ' + F.time(app.loadedAt / 1000) + ' NY') : null,
-    app.refreshFailed ? h('span', { class: 'badge warn', tiptext: 'The latest refresh failed, so the screen still shows what was loaded at the time on the left. Press r to try again; with auto-refresh on it also retries every minute.' }, 'REFRESH FAILED') : null,
-    c && c.pricedAt < Date.now() / 1000 - 1200 ? h('span', { tiptext: 'The market is closed, so option quotes are frozen at the last close. Implied volatility and the Greeks are worked out as of that moment. Days to expiry count from now.' },
-      `Options as of ${F.dateTime(c.pricedAt)} NY`) : null,
-    c?.mode === 'last' ? h('span', { class: 'badge warn', tiptext: 'Live quotes are blank (market closed), so prices are last trades.' }, 'LAST-TRADE PRICES') : null,
+    app.refreshFailed
+      ? h(
+          'span',
+          {
+            class: 'badge warn',
+            tiptext:
+              'The latest refresh failed, so the screen still shows what was loaded at the time on the left. Press r to try again; with auto-refresh on it also retries every minute.',
+          },
+          'REFRESH FAILED',
+        )
+      : null,
+    c && c.pricedAt < Date.now() / 1000 - 1200
+      ? h(
+          'span',
+          {
+            tiptext:
+              'The market is closed, so option quotes are frozen at the last close. Implied volatility and the Greeks are worked out as of that moment. Days to expiry count from now.',
+          },
+          `Options as of ${F.dateTime(c.pricedAt)} NY`,
+        )
+      : null,
+    c?.mode === 'last'
+      ? h(
+          'span',
+          { class: 'badge warn', tiptext: 'Live quotes are blank (market closed), so prices are last trades.' },
+          'LAST-TRADE PRICES',
+        )
+      : null,
     fresh ? h('span', { class: m.isError ? 'err' : 'msg' }, m.text) : null,
     h('span', { class: 'sp' }),
-    check('auto-refresh 60s', app.autoRefresh, v => { app.autoRefresh = v; disk.set('auto', v); }),
-    h('span', { class: 'keys' }, h('kbd', null, '/'), ' command  ', h('kbd', null, '1'), '–', h('kbd', null, '8'), ' views  ', h('kbd', null, '['), h('kbd', null, ']'), ' expiry  ', h('kbd', null, '?'), ' help'));
+    check('auto-refresh 60s', app.autoRefresh, v => {
+      app.autoRefresh = v;
+      disk.set('auto', v);
+    }),
+    h(
+      'span',
+      { class: 'keys' },
+      h('kbd', null, '/'),
+      ' command  ',
+      h('kbd', null, '1'),
+      '–',
+      h('kbd', null, '8'),
+      ' views  ',
+      h('kbd', null, '['),
+      h('kbd', null, ']'),
+      ' expiry  ',
+      h('kbd', null, '?'),
+      ' help',
+    ),
+  );
 }
 
 const applyText = () => document.documentElement.style.setProperty('--text', app.text);
 function renderTop() {
-  const sizes = seg(TEXT_SIZES, app.text, size => {
-    app.text = size; disk.set('text', size); applyText();
-    keepFocus(() => { renderTop(); render(); });        // charts take their text size when drawn, so draw them again
-  }, null, 'Text size');
+  const sizes = seg(
+    TEXT_SIZES,
+    app.text,
+    size => {
+      app.text = size;
+      disk.set('text', size);
+      applyText();
+      keepFocus(() => {
+        renderTop();
+        render();
+      }); // charts take their text size when drawn, so draw them again
+    },
+    null,
+    'Text size',
+  );
   sizes.classList.add('textsize');
-  mount($('topbtns'),
+  mount(
+    $('topbtns'),
     h('span', { class: 'clock', id: 'clock' }),
     sizes,
     btn('GLOSSARY', showGlossary, '', 'Every term in plain English'),
-    btn('HELP', showHelp, '', 'Commands and shortcuts'));
+    btn('HELP', showHelp, '', 'Commands and shortcuts'),
+  );
   tick();
 }
 function tick() {
   const el = $('clock');
-  if (el) el.textContent = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: '2-digit', second: '2-digit' }) + ' NY';
+  if (el)
+    el.textContent =
+      new Date().toLocaleString('en-US', {
+        timeZone: 'America/New_York',
+        weekday: 'short',
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+      }) + ' NY';
 }
 
-/** The banner for a load that failed: the reason, a way to try again and (when there is something else to look at) a way to put it aside. */
-const errorBanner = () => h('div', { class: 'banner err', role: 'alert' }, app.error, '  ',
-  btn('RETRY', () => load(app.failed || app.symbol), '', 'Try loading it again'),
-  app.quote ? h('button', { class: 'btn ghost', key: 'dismiss-error', 'aria-label': 'Dismiss this message', tiptext: 'Dismiss',
-                            onclick: () => { app.error = app.failed = null; renderView(); } }, '✕') : null);
+/**
+ * The banner for a load that failed: the reason, a way to try again and
+ * (when there is something else to look at) a way to put it aside.
+ */
+const errorBanner = () =>
+  h(
+    'div',
+    { class: 'banner err', role: 'alert' },
+    app.error,
+    '  ',
+    btn('RETRY', () => load(app.failed || app.symbol), '', 'Try loading it again'),
+    app.quote
+      ? h(
+          'button',
+          {
+            class: 'btn ghost',
+            key: 'dismiss-error',
+            'aria-label': 'Dismiss this message',
+            tiptext: 'Dismiss',
+            onclick: () => {
+              app.error = app.failed = null;
+              renderView();
+            },
+          },
+          '✕',
+        )
+      : null,
+  );
 /** An error about a ticker that never loaded is old news once the user moves on to something else. */
-function dropOldError() { if (app.quote && app.failed !== app.symbol) app.error = app.failed = null; }
+function dropOldError() {
+  if (app.quote && app.failed !== app.symbol) app.error = app.failed = null;
+}
 
 function renderView() {
-  const root = $('view'), old = document.querySelector('.chain-wrap'), keep = old && [old.scrollTop, old.scrollLeft];
+  const root = $('view'),
+    old = document.querySelector('.chain-wrap'),
+    keep = old && [old.scrollTop, old.scrollLeft];
   keepFocus(() => {
     mount(root);
-    if (app.pending) append(root, skeleton(`Loading ${app.pending}…`, 7, 's7'), skeleton('Snapshot', 7, 's5'), skeleton('Price', 5, 's7'), skeleton('Expiries', 5, 's5'));
-    else if (!app.quote) append(root, app.error ? errorBanner() : null, empty('Type a ticker in the command line above, for example SPY or AAPL.'));
+    if (app.pending)
+      append(
+        root,
+        skeleton(`Loading ${app.pending}…`, 7, 's7'),
+        skeleton('Snapshot', 7, 's5'),
+        skeleton('Price', 5, 's7'),
+        skeleton('Expiries', 5, 's5'),
+      );
+    else if (!app.quote)
+      append(
+        root,
+        app.error ? errorBanner() : null,
+        empty('Type a ticker in the command line above, for example SPY or AAPL.'),
+      );
     else {
       if (app.error) append(root, errorBanner());
-      try { VIEWS.find(v => v.id === app.view).render(root, ctx); } catch (e) {
+      try {
+        VIEWS.find(v => v.id === app.view).render(root, ctx);
+      } catch (e) {
         console.error(e);
-        append(root, h('div', { class: 'banner err' }, `This view hit an error: ${e.message}. The other views still work.`));
+        append(
+          root,
+          h('div', { class: 'banner err' }, `This view hit an error: ${e.message}. The other views still work.`),
+        );
       }
     }
   });
@@ -398,11 +821,23 @@ function renderView() {
   const wrap = document.querySelector('.chain-wrap');
   if (wrap && keep) [wrap.scrollTop, wrap.scrollLeft] = keep;
 }
-function renderChrome() { $('top').classList.toggle('busy', app.loading); renderTabs(); renderQuote(); renderWatch(); renderStatus(); }
+function renderChrome() {
+  $('top').classList.toggle('busy', app.loading);
+  renderTabs();
+  renderQuote();
+  renderWatch();
+  renderStatus();
+}
 function render() {
-  document.title = app.pending ? `Loading ${app.pending.replace('^', '')}… · Options Terminal`
-    : app.symbol ? `${app.symbol.replace('^', '')} ${F.price(app.quote?.price)} · Options Terminal` : 'Options Terminal';
-  keepFocus(() => { renderChrome(); renderView(); });
+  document.title = app.pending
+    ? `Loading ${app.pending.replace('^', '')}… · Options Terminal`
+    : app.symbol
+      ? `${app.symbol.replace('^', '')} ${F.price(app.quote?.price)} · Options Terminal`
+      : 'Options Terminal';
+  keepFocus(() => {
+    renderChrome();
+    renderView();
+  });
 }
 
 /**
@@ -411,39 +846,80 @@ function render() {
  * The stylesheet does the moving; this keeps its two numbers (--top-h, --tabs-h) true.
  */
 function initChrome() {
-  const top = $('top'), tabs = $('tabs'), body = document.body, root = document.documentElement;
+  const top = $('top'),
+    tabs = $('tabs'),
+    body = document.body,
+    root = document.documentElement;
   let anchor = scrollY;
   const measure = () => {
     root.style.setProperty('--top-h', (body.classList.contains('tucked') ? 0 : top.offsetHeight) + 'px');
     root.style.setProperty('--tabs-h', tabs.offsetHeight + 'px');
   };
-  const tuck = on => { if (body.classList.contains('tucked') !== on) { body.classList.toggle('tucked', on); measure(); } };
-  const update = () => {                      // browsers send at most one scroll event per frame, so this needs no throttle
+  const tuck = on => {
+    if (body.classList.contains('tucked') !== on) {
+      body.classList.toggle('tucked', on);
+      measure();
+    }
+  };
+  const update = () => {
+    // browsers send at most one scroll event per frame, so this needs no throttle
     const y = scrollY;
-    if (y < 60 || document.activeElement === $('cmd')) { tuck(false); anchor = y; }
-    else if (Math.abs(y - anchor) > 8) { tuck(y > anchor); anchor = y; }        // 8px of travel, so a nudge does not flip it
+    if (y < 60 || document.activeElement === $('cmd')) {
+      tuck(false);
+      anchor = y;
+    } else if (Math.abs(y - anchor) > 8) {
+      tuck(y > anchor);
+      anchor = y;
+    } // 8px of travel, so a nudge does not flip it
     body.classList.toggle('scrolled', $('quote').getBoundingClientRect().bottom < tabs.getBoundingClientRect().bottom);
   };
   addEventListener('scroll', update, { passive: true });
   $('cmd').addEventListener('focus', () => tuck(false));
   const watcher = new ResizeObserver(measure);
-  watcher.observe(top); watcher.observe(tabs);
+  watcher.observe(top);
+  watcher.observe(tabs);
 }
 
 // ---------------------------------------------------------------- command line
 
 function initCommand() {
-  const input = $('cmd'), box = $('suggest');
-  let items = [], active = -1, timer = null, seq = 0;
-  const close = () => { box.hidden = true; items = []; active = -1; };
+  const input = $('cmd'),
+    box = $('suggest');
+  let items = [],
+    active = -1,
+    timer = null,
+    seq = 0;
+  const close = () => {
+    box.hidden = true;
+    items = [];
+    active = -1;
+  };
   const draw = () => {
     box.hidden = !items.length;
-    mount(box, items.map((it, i) => h('div', { class: i === active ? 'on' : '', onmousedown: ev => { ev.preventDefault(); run(it); } },
-      h('b', null, it.symbol || it.word), h('span', null, it.name), h('i', null, it.kind))));
+    mount(
+      box,
+      items.map((it, i) =>
+        h(
+          'div',
+          {
+            class: i === active ? 'on' : '',
+            onmousedown: ev => {
+              ev.preventDefault();
+              run(it);
+            },
+          },
+          h('b', null, it.symbol || it.word),
+          h('span', null, it.name),
+          h('i', null, it.kind),
+        ),
+      ),
+    );
   };
   const run = it => {
-    const offered = items.map(x => x.symbol);             // what the list was showing when Enter was pressed
-    input.value = ''; close(); input.blur();
+    const offered = items.map(x => x.symbol); // what the list was showing when Enter was pressed
+    input.value = '';
+    close();
+    input.blur();
     if (it.action) return it.action();
     if (!it.symbol) return ctx.go(it.view);
     // A suggestion, or a ticker already seen, opens at once. Anything else typed is checked first.
@@ -456,15 +932,28 @@ function initCommand() {
    */
   const openTyped = async ({ symbol, view, name }) => {
     ctx.status(`Looking up ${name || symbol}…`);
-    const isReal = !name && isTicker(symbol) && await api('/api/quote?symbol=' + encodeURIComponent(symbol)).then(() => true, () => false);
+    const isReal =
+      !name &&
+      isTicker(symbol) &&
+      (await api('/api/quote?symbol=' + encodeURIComponent(symbol)).then(
+        () => true,
+        () => false,
+      ));
     if (isReal) return ctx.load(symbol, view);
     let hits = [];
-    try { hits = (await api('/api/search?q=' + encodeURIComponent(name || symbol))).results; } catch { /* the plain load below reports the problem */ }
+    try {
+      hits = (await api('/api/search?q=' + encodeURIComponent(name || symbol))).results;
+    } catch {
+      /* the plain load below reports the problem */
+    }
     const best = hits.find(hit => isTicker(hit.symbol));
-    if (!best) return load(symbol);                       // nothing found: let the normal error say so
+    if (!best) return load(symbol); // nothing found: let the normal error say so
     ctx.load(best.symbol, view);
   };
-  /** What a typed line means: { action } | { view } | { symbol, view, typed, name: the whole text when it reads as a name, not ticker + view }. */
+  /**
+   * What a typed line means: { action } | { view } | { symbol, view, typed, name }.
+   * name is the whole text when it reads as a name, not ticker + view.
+   */
   const parse = text => {
     const [a, b] = text.trim().toUpperCase().split(/\s+/);
     if (!a) return null;
@@ -476,28 +965,56 @@ function initCommand() {
   };
   // With nothing typed, offer the tickers already in memory: they open instantly.
   const offerRecent = () => {
-    items = [...recent.keys()].reverse().filter(s => s !== app.symbol).map(s => ({ symbol: s, name: recent.get(s).quote.name, kind: 'RECENT · opens instantly' }));
-    active = -1; draw();
+    items = [...recent.keys()]
+      .reverse()
+      .filter(s => s !== app.symbol)
+      .map(s => ({ symbol: s, name: recent.get(s).quote.name, kind: 'RECENT · opens instantly' }));
+    active = -1;
+    draw();
   };
-  input.addEventListener('focus', () => { if (!input.value.trim()) offerRecent(); });
+  input.addEventListener('focus', () => {
+    if (!input.value.trim()) offerRecent();
+  });
   input.addEventListener('input', () => {
     clearTimeout(timer);
     const text = input.value.trim();
-    if (!text) { seq++; return offerRecent(); }
+    if (!text) {
+      seq++;
+      return offerRecent();
+    }
     timer = setTimeout(async () => {
-      const mine = ++seq, first = text.split(/\s+/)[0];
-      const words = Object.entries(WORDS).filter(([w]) => w.startsWith(text.toUpperCase())).map(([w, view]) => ({ word: w, name: 'Switch to this view', kind: 'VIEW', view }));
+      const mine = ++seq,
+        first = text.split(/\s+/)[0];
+      const words = Object.entries(WORDS)
+        .filter(([w]) => w.startsWith(text.toUpperCase()))
+        .map(([w, view]) => ({ word: w, name: 'Switch to this view', kind: 'VIEW', view }));
       let found = [];
-      try { found = (await api('/api/search?q=' + encodeURIComponent(first))).results; } catch { /* suggestions are optional */ }
+      try {
+        found = (await api('/api/search?q=' + encodeURIComponent(first))).results;
+      } catch {
+        /* suggestions are optional */
+      }
       if (mine !== seq) return;
       items = [...words, ...found.map(r => ({ symbol: r.symbol, name: r.name, kind: `${r.type} · ${r.exchange}` }))];
-      active = -1; draw();
+      active = -1;
+      draw();
     }, 170);
   });
   input.addEventListener('keydown', ev => {
-    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); if (items.length) { active = (active + (ev.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; draw(); } }
-    else if (ev.key === 'Enter') { const it = active >= 0 ? items[active] : parse(input.value); if (it) run(it); }
-    else if (ev.key === 'Escape') { input.value = ''; close(); input.blur(); }
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      if (items.length) {
+        active = (active + (ev.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        draw();
+      }
+    } else if (ev.key === 'Enter') {
+      const it = active >= 0 ? items[active] : parse(input.value);
+      if (it) run(it);
+    } else if (ev.key === 'Escape') {
+      input.value = '';
+      close();
+      input.blur();
+    }
   });
   input.addEventListener('blur', () => setTimeout(close, 120));
 }
@@ -505,54 +1022,138 @@ function initCommand() {
 function initKeys() {
   document.addEventListener('keydown', ev => {
     if (ev.key === 'Escape' && modalOpen()) return closeModal();
-    if (ev.metaKey || ev.ctrlKey || ev.altKey || modalOpen() || /^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName)) return;
+    if (ev.metaKey || ev.ctrlKey || ev.altKey || modalOpen() || /^(INPUT|SELECT|TEXTAREA)$/.test(ev.target.tagName))
+      return;
     const n = Number(ev.key);
     if (ev.key !== ' ' && n >= 1 && n <= VIEWS.length) ctx.go(VIEWS[n - 1].id);
-    else if (ev.key === '/') { ev.preventDefault(); $('cmd').focus({ preventScroll: true }); }
-    else if (ev.key === '?') showHelp();
+    else if (ev.key === '/') {
+      ev.preventDefault();
+      $('cmd').focus({ preventScroll: true });
+    } else if (ev.key === '?') showHelp();
     else if (ev.key === 'g') showGlossary();
     else if (ev.key === 'r' && app.symbol) load(app.symbol);
     else if ((ev.key === '[' || ev.key === ']') && app.chain) {
-      const list = app.chain.expiries, i = list.findIndex(e => e.label === app.expiry);
+      const list = app.chain.expiries,
+        i = list.findIndex(e => e.label === app.expiry);
       const next = list[Math.min(Math.max(i + (ev.key === ']' ? 1 : -1), 0), list.length - 1)];
       if (next && next.label !== app.expiry) ctx.setExpiry(next.label);
     } else if (ev.key.startsWith('Arrow') && app.view === 'chain' && !ev.target.closest('.chain-wrap')) {
       // First arrow press on the chain screen puts the keyboard cursor in the table.
       const table = document.querySelector('.chain-wrap');
-      if (table) { ev.preventDefault(); table.focus(); }
+      if (table) {
+        ev.preventDefault();
+        table.focus();
+      }
     } else if (ev.key === 'Escape' && app.selected) ctx.select(null);
   });
 }
 
 function showHelp() {
   const row = (k, v) => [h('dt', null, k), h('dd', null, v)];
-  openModal('Help', h('div', null,
-    h('dl', { class: 'help' },
-      row('AAPL ⏎', 'Type a ticker in the command line and press Enter. Stocks, ETFs and indexes all work: SPY, QQQ, ^SPX, ^VIX, ^NDX. A company name works too (nvidia): pick it from the list, or press Enter to open the best match.'),
-      row('SPY CHAIN ⏎', 'Add a view after the ticker to land on it: OVERVIEW (OV), PRICE (GP), CHAIN (OC), VOLATILITY (VOL), OI, STRATEGY (STRAT), CALCULATOR (CALC), LEARN. A view word on its own (CHAIN) switches view. Open interest needs the ticker first (SPY OI) or the 5 key, because OI alone is a ticker.'),
-      row('HELP  GLOSSARY  REFRESH', 'Typed in the command line: this help, the glossary, or a reload of the ticker.'),
-      row('/', 'Jump to the command line. With nothing typed it lists recent tickers, which open instantly. The command bar hides as you scroll down a page and returns when you scroll up or press this key.'),
-      row('1 … 8', 'Switch view. The browser\'s Back button steps back through the views and tickers you visited.'),
-      row('[  ]', 'Previous and next expiry.'),
-      row('← ↑ ↓ →', 'On the CHAIN view: move between contracts (left for calls, right for puts). Enter or Space opens the one under the cursor, and closes it again. Page Up and Page Down move ten strikes; Home and End jump to the lowest and highest.'),
-      row('r', 'Reload the current ticker.'),
-      row('g  ?', 'Glossary and this help.'),
-      row('Esc', 'Close a dialog or deselect a contract.'),
-      row('A A A', 'Text size, top right: normal, larger, largest. Charts follow it.')),
-    h('p', { class: 'note' }, 'The address bar holds the ticker, the view, the expiry, the selected contract, the legs of a strategy and the lesson: bookmark it or copy it to come straight back. Other settings (calculator inputs, chart range, columns, text size) and your watch list, saved positions and lesson progress are remembered by this browser only.'),
-    h('p', { class: 'note' }, 'Hover a column heading or a label for a plain-English definition. Panels with a ? LEARN button open the lesson behind them.'),
-    h('p', { class: 'note' }, 'The screen refreshes every minute while auto-refresh is ticked. It pauses on the Learn, Calculator and Strategy views and while a slider has the focus, so nothing moves under your hands.'),
-    h('p', { class: 'note' }, 'Data: option chains come from Nasdaq\'s public feed, and from Yahoo Finance when Nasdaq has none (most indexes); the status bar names the source. Prices, history and search come from Yahoo Finance. Everything is delayed about 15 minutes and comes without any guarantee. Volatility and Greeks are computed here from bid and ask prices; when the market is closed they are worked out as of the last close.'),
-    h('p', { class: 'note small' }, 'This is a learning and analysis tool. Nothing in it is investment advice, and it cannot place orders.')));
+  openModal(
+    'Help',
+    h(
+      'div',
+      null,
+      h(
+        'dl',
+        { class: 'help' },
+        row(
+          'AAPL ⏎',
+          'Type a ticker in the command line and press Enter. Stocks, ETFs and indexes all work: SPY, QQQ, ^SPX, ^VIX, ^NDX. A company name works too (nvidia): pick it from the list, or press Enter to open the best match.',
+        ),
+        row(
+          'SPY CHAIN ⏎',
+          'Add a view after the ticker to land on it: OVERVIEW (OV), PRICE (GP), CHAIN (OC), VOLATILITY (VOL), OI, STRATEGY (STRAT), CALCULATOR (CALC), LEARN. A view word on its own (CHAIN) switches view. Open interest needs the ticker first (SPY OI) or the 5 key, because OI alone is a ticker.',
+        ),
+        row(
+          'HELP  GLOSSARY  REFRESH',
+          'Typed in the command line: this help, the glossary, or a reload of the ticker.',
+        ),
+        row(
+          '/',
+          'Jump to the command line. With nothing typed it lists recent tickers, which open instantly. The command bar hides as you scroll down a page and returns when you scroll up or press this key.',
+        ),
+        row('1 … 8', "Switch view. The browser's Back button steps back through the views and tickers you visited."),
+        row('[  ]', 'Previous and next expiry.'),
+        row(
+          '← ↑ ↓ →',
+          'On the CHAIN view: move between contracts (left for calls, right for puts). Enter or Space opens the one under the cursor, and closes it again. Page Up and Page Down move ten strikes; Home and End jump to the lowest and highest.',
+        ),
+        row('r', 'Reload the current ticker.'),
+        row('g  ?', 'Glossary and this help.'),
+        row('Esc', 'Close a dialog or deselect a contract.'),
+        row('A A A', 'Text size, top right: normal, larger, largest. Charts follow it.'),
+      ),
+      h(
+        'p',
+        { class: 'note' },
+        'The address bar holds the ticker, the view, the expiry, the selected contract, the legs of a strategy and the lesson: bookmark it or copy it to come straight back. Other settings (calculator inputs, chart range, columns, text size) and your watch list, saved positions and lesson progress are remembered by this browser only.',
+      ),
+      h(
+        'p',
+        { class: 'note' },
+        'Hover a column heading or a label for a plain-English definition. Panels with a ? LEARN button open the lesson behind them.',
+      ),
+      h(
+        'p',
+        { class: 'note' },
+        'The screen refreshes every minute while auto-refresh is ticked. It pauses on the Learn, Calculator and Strategy views and while a slider has the focus, so nothing moves under your hands.',
+      ),
+      h(
+        'p',
+        { class: 'note' },
+        "Data: option chains come from Nasdaq's public feed, and from Yahoo Finance when Nasdaq has none (most indexes); the status bar names the source. Prices, history and search come from Yahoo Finance. Everything is delayed about 15 minutes and comes without any guarantee. Volatility and Greeks are computed here from bid and ask prices; when the market is closed they are worked out as of the last close.",
+      ),
+      h(
+        'p',
+        { class: 'note small' },
+        'This is a learning and analysis tool. Nothing in it is investment advice, and it cannot place orders.',
+      ),
+    ),
+  );
 }
 
 function showGlossary() {
   const list = h('dl', { class: 'gloss' });
-  const fill = text => mount(list, Object.entries(TERMS).filter(([, t]) => (t.term + t.short + t.long).toLowerCase().includes(text.toLowerCase()))
-    .sort((a, b) => a[1].term.localeCompare(b[1].term))
-    .map(([, t]) => [h('dt', null, t.term), h('dd', null, h('b', null, t.short), ' ', t.long, ' ',
-      t.lesson ? h('a', { href: '#', onclick: ev => { ev.preventDefault(); closeModal(); ctx.openLesson(t.lesson); } }, 'Open the lesson →') : null)]));
-  const search = h('input', { type: 'text', placeholder: 'Search the glossary…', style: { width: '100%' }, oninput: ev => fill(ev.target.value) });
+  const fill = text =>
+    mount(
+      list,
+      Object.entries(TERMS)
+        .filter(([, t]) => (t.term + t.short + t.long).toLowerCase().includes(text.toLowerCase()))
+        .sort((a, b) => a[1].term.localeCompare(b[1].term))
+        .map(([, t]) => [
+          h('dt', null, t.term),
+          h(
+            'dd',
+            null,
+            h('b', null, t.short),
+            ' ',
+            t.long,
+            ' ',
+            t.lesson
+              ? h(
+                  'a',
+                  {
+                    href: '#',
+                    onclick: ev => {
+                      ev.preventDefault();
+                      closeModal();
+                      ctx.openLesson(t.lesson);
+                    },
+                  },
+                  'Open the lesson →',
+                )
+              : null,
+          ),
+        ]),
+    );
+  const search = h('input', {
+    type: 'text',
+    placeholder: 'Search the glossary…',
+    style: { width: '100%' },
+    oninput: ev => fill(ev.target.value),
+  });
   fill('');
   openModal('Glossary', h('div', null, search, list), { wide: true });
   search.focus();
@@ -561,7 +1162,12 @@ function showGlossary() {
 // ---------------------------------------------------------------- start
 
 function start() {
-  applyText(); initTips(); initCommand(); initKeys(); initChrome(); renderTop();
+  applyText();
+  initTips();
+  initCommand();
+  initKeys();
+  initChrome();
+  renderTop();
   $('brand').addEventListener('click', () => ctx.go('overview'));
   addEventListener('popstate', applyUrl);
   addEventListener('hashchange', applyUrl);
@@ -572,14 +1178,21 @@ function start() {
   load(u.symbol || stored('last', 'SPY', isTicker));
   refreshWatch();
   setInterval(tick, 1000);
-  setInterval(() => { if (document.visibilityState === 'visible') refreshWatch(); }, 60000);
+  setInterval(() => {
+    if (document.visibilityState === 'visible') refreshWatch();
+  }, 60000);
   // Heartbeat: a server started by the app icon stops itself once no page has spoken to it for a while.
-  setInterval(() => { fetch('/api/ping').catch(() => {}); }, 60000);
+  setInterval(() => {
+    fetch('/api/ping').catch(() => {});
+  }, 60000);
   setInterval(() => {
     // A refresh redraws the view, so it waits while that would pull a control out from under the
     // user: on the views that are all inputs, with a dialog open, or while a slider has the focus.
-    const busy = ['learn', 'calc', 'strategy'].includes(app.view) || modalOpen() || document.activeElement?.type === 'range';
-    if (app.autoRefresh && document.visibilityState === 'visible' && app.symbol && !app.loading && !busy) load(app.symbol, { quiet: true });
+    const busy =
+      ['learn', 'calc', 'strategy'].includes(app.view) || modalOpen() || document.activeElement?.type === 'range';
+    if (app.autoRefresh && document.visibilityState === 'visible' && app.symbol && !app.loading && !busy)
+      load(app.symbol, { quiet: true });
   }, 60000);
 }
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+else start();

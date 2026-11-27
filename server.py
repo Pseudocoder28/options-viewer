@@ -190,7 +190,8 @@ def get_quotes(symbols):
         def fetch():
             fast = yf.Ticker(symbol).fast_info
             price, prev = clean(fast.last_price, 4), clean(fast.previous_close, 4)
-            return {"symbol": symbol, "price": price, "changePct": round((price / prev - 1) * 100, 2) if price and prev else None}
+            return {"symbol": symbol, "price": price,
+                    "changePct": round((price / prev - 1) * 100, 2) if price and prev else None}
         try:
             return cached(("lite", symbol), 30, fetch)
         except Exception:
@@ -240,9 +241,10 @@ def chain_nasdaq(symbol, kind):
         exp = f"20{ymd[:2]}-{ymd[2:4]}-{ymd[4:]}"
         for put, p in ((0, "c_"), (1, "p_")):
             rows.append({"root": root, "exp": exp, "put": put, "strike": strike,
-                         "bid": clean(r.get(p + "Bid")), "ask": clean(r.get(p + "Ask")), "last": clean(r.get(p + "Last")),
-                         "chg": clean(r.get(p + "Change")), "vol": clean(r.get(p + "Volume")),
-                         "oi": clean(r.get(p + "Openinterest")), "lastTrade": None})
+                         "bid": clean(r.get(p + "Bid")), "ask": clean(r.get(p + "Ask")),
+                         "last": clean(r.get(p + "Last")), "chg": clean(r.get(p + "Change")),
+                         "vol": clean(r.get(p + "Volume")), "oi": clean(r.get(p + "Openinterest")),
+                         "lastTrade": None})
     return rows or None
 
 
@@ -262,8 +264,9 @@ def chain_yahoo(symbol, kind):
             for r in frame.itertuples():
                 m = OCC_SYM.match(r.contractSymbol)
                 traded = r.lastTradeDate
-                rows.append({"root": m.group(1) if m else symbol.lstrip("^"), "exp": exp, "put": put, "strike": float(r.strike),
-                             "bid": clean(r.bid), "ask": clean(r.ask), "last": clean(r.lastPrice), "chg": clean(r.change),
+                rows.append({"root": m.group(1) if m else symbol.lstrip("^"), "exp": exp, "put": put,
+                             "strike": float(r.strike), "bid": clean(r.bid), "ask": clean(r.ask),
+                             "last": clean(r.lastPrice), "chg": clean(r.change),
                              "vol": clean(r.volume), "oi": clean(r.openInterest),
                              "lastTrade": int(traded.timestamp()) if traded == traded else None})
         return rows
@@ -318,7 +321,8 @@ def get_chain(symbol):
 # ---------------------------------------------------------------- http
 
 class Server(ThreadingHTTPServer):
-    request_queue_size = 128      # the default of 5 turns away a burst of connections (a page load opens several at once)
+    # The default of 5 turns away a burst of connections (a page load opens several at once).
+    request_queue_size = 128
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -346,7 +350,8 @@ class Handler(BaseHTTPRequestHandler):
     def send_json(self, obj, status=200):
         try:
             body = json.dumps(obj, separators=(",", ":"), allow_nan=False)
-        except ValueError:     # a NaN or infinity slipped through from a data source: say so rather than drop the connection
+        except ValueError:
+            # A NaN or infinity slipped through from a data source: say so rather than drop the connection.
             body, status = json.dumps({"error": "The data source sent a number that cannot be shown. Try again."}), 502
         self.send_body(body.encode(), "application/json", status)
 
@@ -397,7 +402,8 @@ class Handler(BaseHTTPRequestHandler):
                 out = get_history(symbol(), rng)
             elif name == "quotes":
                 wanted = [s.strip() for s in arg("symbols").upper().split(",")]
-                symbols = list(dict.fromkeys(s for s in wanted if SYMBOL.fullmatch(s)))[:40]      # valid, no repeats, at most 40
+                # Valid, no repeats, at most 40.
+                symbols = list(dict.fromkeys(s for s in wanted if SYMBOL.fullmatch(s)))[:40]
                 out = {"quotes": get_quotes(symbols)}
             elif name == "search":
                 q = arg("q")[:50]
@@ -416,9 +422,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def static(self, path):
         try:
-            target = (STATIC / ("index.html" if path in ("/", "") else path.removeprefix("/static/").lstrip("/"))).resolve()
-            found = STATIC in target.parents and target.is_file()       # resolve() first, so ".." cannot climb out of static/
-        except (OSError, ValueError):                                   # a name too long or otherwise impossible for the file system
+            target = (
+                STATIC / ("index.html" if path in ("/", "") else path.removeprefix("/static/").lstrip("/"))
+            ).resolve()
+            # resolve() first, so ".." cannot climb out of static/
+            found = STATIC in target.parents and target.is_file()
+        except (OSError, ValueError):  # a name too long or otherwise impossible for the file system
             found = False
         if not found:
             return self.send_body(b"Not found", "text/plain", 404)
@@ -431,14 +440,16 @@ class Handler(BaseHTTPRequestHandler):
 def _check():
     """Quick self-test of the parsing rules, run at every start. A failure here stops the server with a traceback."""
     assert clean("--") is None and clean("1,234.5") == 1234.5 and clean(float("nan")) is None and clean("0.30") == 0.3
-    assert SYMBOL.fullmatch("BRK-B") and SYMBOL.fullmatch("^SPX") and not SYMBOL.fullmatch("AA\n") and not SYMBOL.fullmatch("../X")
+    assert (SYMBOL.fullmatch("BRK-B") and SYMBOL.fullmatch("^SPX")
+            and not SYMBOL.fullmatch("AA\n") and not SYMBOL.fullmatch("../X"))
     m = OCC_URL.search("/market-activity/stocks/gemi/option-chain/call-put-options/gemi--261204c00001500")
     assert m.groups() == ("gemi", "261204", "00001500")
     assert OCC_SYM.match("SPXW261120C07335000").group(1) == "SPXW"
     row = lambda root, exp: {"root": root, "exp": exp, "put": 1, "strike": 2.0, "bid": 0.3, "ask": 0.4, "last": None,
                              "chg": None, "vol": None, "oi": 5, "lastTrade": None}
     packed = pack_chain("GEMI", "EQUITY", "test", [row("GEMI", "2026-12-04"), row("GEMI1", "2026-12-04")])
-    assert packed["adjustedDropped"] == 1 and len(packed["rows"]) == 1 and packed["rows"][0][:5] == [0, 2.0, 1, 0.3, 0.4]
+    assert (packed["adjustedDropped"] == 1 and len(packed["rows"]) == 1
+            and packed["rows"][0][:5] == [0, 2.0, 1, 0.3, 0.4])
     index = pack_chain("^SPX", "INDEX", "test", [row("SPX", "2026-12-18"), row("SPXW", "2026-12-18")])
     assert [e["am"] for e in index["expiries"]] == [True, False] and index["expiries"][0]["label"].endswith("SPX")
     assert index["expiries"][1]["close"] - index["expiries"][0]["close"] == 6.5 * 3600
@@ -450,7 +461,8 @@ def main():
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8765)))
     ap.add_argument("--no-browser", action="store_true", help="do not open the browser")
     ap.add_argument("--idle-exit", type=int, default=0, metavar="SECONDS",
-                    help="stop after this long without a request (the app launcher uses it, so no server is left running)")
+                    help="stop after this long without a request "
+                         "(the app launcher uses it, so no server is left running)")
     args = ap.parse_args()
     try:
         httpd = Server(("127.0.0.1", args.port), Handler)
