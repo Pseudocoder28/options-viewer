@@ -1791,3 +1791,171 @@ h2.sub {
   border-top: 1px solid var(--line);
   max-width: none;
 }
+
+/* ---------- portfolio ---------- */
+.band {
+  margin: 10px 2px 0;
+  color: var(--amber);
+  font-size: calc(11px * var(--text));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.panel.drop.dropping {
+  outline: 2px dashed var(--amber);
+  outline-offset: -4px;
+}
+.welcome {
+  font-family: var(--sans);
+  max-width: 86ch;
+  padding: 6px 4px;
+}
+.welcome .lead {
+  font-size: calc(14.5px * var(--text));
+  color: var(--ink);
+  margin: 4px 0 10px;
+}
+.steps {
+  margin: 0 0 10px;
+  padding-left: 22px;
+  color: var(--ink2);
+  font-size: calc(13px * var(--text));
+  line-height: 1.6;
+}
+.steps li {
+  margin: 6px 0;
+}
+.steps b {
+  color: var(--ink);
+}
+.banner.ok {
+  border-color: var(--line2);
+  background: var(--panel);
+  color: var(--ink2);
+}
+.bars {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(34px, 1fr) auto auto;
+  gap: 4px 8px;
+  align-items: center;
+}
+.barrow {
+  display: contents;
+}
+.barrow .lab {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: calc(150px * var(--text));
+  color: var(--ink2);
+}
+.barrow .track,
+.wbar {
+  background: #1b1b19;
+  height: 8px;
+}
+.barrow .track i,
+.wbar i {
+  display: block;
+  height: 100%;
+  background: var(--amber);
+}
+.barrow .pct,
+.barrow .amt {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.barrow .amt {
+  color: var(--muted);
+}
+.wbar {
+  display: inline-block;
+  width: 46px;
+  margin-right: 7px;
+  vertical-align: middle;
+}
+.wbar.neg i {
+  background: var(--call);
+}
+.holdings td .sub {
+  display: block;
+  color: var(--muted);
+  font-size: calc(11px * var(--text));
+  white-space: normal;
+}
+.holdings td .btn {
+  padding: 0 5px;
+}
+.form {
+  display: grid;
+  gap: 9px;
+  font-family: var(--sans);
+}
+.form .field {
+  display: grid;
+  grid-template-columns: calc(96px * var(--text)) minmax(0, 220px) 1fr;
+  align-items: center;
+  gap: 8px;
+}
+.form .field small {
+  color: var(--muted);
+  font-size: calc(11.5px * var(--text));
+}
+.form input[type='date'] {
+  background: #000;
+  border: 1px solid var(--line2);
+  padding: 3px 6px;
+  color: var(--ink);
+}
+.note.warn {
+  color: var(--amber);
+  min-height: 1.2em;
+  margin: 0;
+}
+@media (max-width: 620px) {
+  .form .field {
+    grid-template-columns: 1fr;
+  }
+  .barrow .amt {
+    display: none;
+  }
+  .bars {
+    grid-template-columns: minmax(0, auto) minmax(34px, 1fr) auto;
+  }
+}
+.stats.fit {
+  grid-template-columns: repeat(auto-fit, minmax(calc(150px * var(--text)), 1fr));
+}
+.holdings td .nm {
+  display: inline-block;
+  max-width: 38ch;
+  margin-left: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  color: var(--muted);
+}
+/* the four "where the money is" panels: a row of four on a wide screen, two by two on a medium one */
+@media (min-width: 700px) and (max-width: 1150px) {
+  #view > .half {
+    grid-column: span 6;
+  }
+  .holdings td .nm {
+    max-width: 20ch;
+  }
+}
+/* a stats grid whose last row may be short: lines round each cell, so no grey block fills the gap */
+.stats.fit {
+  background: none;
+  border: 0;
+  padding: 1px;
+}
+.stats.fit .stat {
+  outline: 1px solid var(--line);
+}
+@media (max-width: 700px) {
+  /* on a phone the ticker and the numbers matter more than the long name */
+  .holdings td .nm {
+    display: none;
+  }
+}

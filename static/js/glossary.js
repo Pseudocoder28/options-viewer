@@ -316,4 +316,57 @@ export const TERMS = {
     long: 'A put bought against shares you own is a hedge. Dealers who sell options hedge by trading the shares, buying or selling as delta changes, and that trading is what gamma exposure tries to estimate.',
     lesson: 'gamma',
   },
+  // ---- the Portfolio view
+  weight: {
+    term: 'Weight',
+    short: 'The share of the whole portfolio that one holding makes up, by what it is worth today.',
+    long: 'A holding worth $2,000 in a $10,000 portfolio has a weight of 20%. Weights move by themselves as prices change: a holding that doubles while the rest stand still becomes a bigger part of the whole.',
+  },
+  bookvalue: {
+    term: 'Book value and gain',
+    short: 'Book value is what a position cost you in total. The gain is what it is worth now minus that.',
+    long: 'Your broker tracks the book value as you buy and sell. For a US holding it is recorded in Canadian dollars at the exchange rate of each purchase, so the gain shown in Canadian dollars includes what the exchange rate did. It is a gain on paper until you sell.',
+  },
+  lookthrough: {
+    term: 'Looking inside funds',
+    short: 'Counting a fund by what it holds: the companies, sectors, bonds and cash inside it.',
+    long: 'A fund is a basket. An S&P 500 fund is roughly a third technology shares, so holding it alongside technology shares of your own piles more money into one sector than the list of holdings suggests. Opening the funds up shows where the money really sits. The data lists every sector of a fund but only its ten largest holdings.',
+  },
+  diversification: {
+    term: 'Diversification',
+    short: 'Spreading money across holdings that do not all rise and fall together, so one bad outcome hurts less.',
+    long: 'It is measured two ways here. By size: how much sits in a few holdings. By movement: how much the holdings have swung together. Ten holdings that move as one are little more diversified than one. Holdings that move differently smooth each other out.',
+  },
+  effholdings: {
+    term: 'Effective number of holdings',
+    short: 'How many equal-sized holdings would be as concentrated as yours. Small holdings barely count.',
+    long: 'Ten holdings of 10% each count as ten. Ten holdings where one is 70% and nine are about 3% count as about two, because nearly everything depends on the big one. It is 1 divided by the sum of the squared weights.',
+  },
+  correlation: {
+    term: 'Correlation',
+    short: 'How closely two holdings have moved together, from -1 (opposite) through 0 (unrelated) to 1 (in step).',
+    long: 'It is measured on daily price changes over the past year. Two technology shares might be at 0.7; a share and a bond fund near 0. Correlations are not fixed: in a sharp market fall most shares drop together and correlations rise.',
+  },
+  portvol: {
+    term: 'Yearly swing (volatility)',
+    short: 'How much a holding, or the whole portfolio, has typically moved in a year, as one standard deviation.',
+    long: 'A swing of 15% means that in about two years out of three the result would land within 15% either side of the average, if the coming year resembled the past one. The portfolio swings less than its holdings would in step, because their moves partly cancel. It is the same idea as historical volatility for a single stock.',
+    lesson: 'iv',
+  },
+  riskshare: {
+    term: 'Share of risk',
+    short: 'How much of the portfolio’s swing came from one holding, as against its share of the money.',
+    long: 'A holding carries more risk than its weight when it swings a lot, or moves with everything else. A volatile share at 10% of the money can be 30% of the swing. A holding with a negative share, such as a put bought against shares you own, steadied the rest. The shares add up to 100%.',
+  },
+  beta: {
+    term: 'Beta',
+    short: 'How much something has moved for each 1% move in the market. A beta of 1.2 moved 1.2%.',
+    long: 'It is measured against an index over the past year: the S&P 500 for US shares, the TSX for Canadian ones. A beta above 1 has moved more than the market, below 1 less, and below 0 against it. Cash has a beta of 0.',
+  },
+  drawdown: {
+    term: 'Drawdown (worst drop)',
+    short:
+      'A fall from a high point to a later low, before a new high is made. The worst one is the deepest such fall.',
+    long: 'A portfolio that climbs to 110, sinks to 88 and then recovers had a drawdown of 20%. It shows what it would have felt like to hold through the worst stretch, which a yearly average hides.',
+  },
 };

@@ -198,4 +198,7 @@ test('probabilities, statistics and interpolation helpers', () => {
 // ---- the chain model and strategy maths (tests-model.mjs); its live checks need the server running
 const model = await import('./static/js/model.js');
 await (await import('./tests-model.mjs')).run(model, test, close);
+
+// ---- the portfolio maths (tests-portfolio.mjs); its live checks need the server running too
+await (await import('./tests-portfolio.mjs')).run(test, close);
 console.log(`\n${passed} checks passed`);

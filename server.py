@@ -13,6 +13,7 @@ Data sources (free, no key, about 15 minutes delayed):
   option chains   Nasdaq public API: the complete listing for US stocks and ETFs.
                   Yahoo Finance is the fallback: indexes (SPX, VIX, NDX, RUT) and anything Nasdaq lacks.
   quotes, price history, ticker search, risk-free rate   Yahoo Finance (through yfinance)
+  what a holding is (sector, country) and what a fund holds inside   Yahoo Finance (through yfinance)
 
 To add a real-time source, write one more chain_<name>(symbol, kind) that returns the same
 row dicts as chain_nasdaq and put it first in get_chain().
@@ -54,6 +55,15 @@ RANGES = {"1D": ("1d", "5m"), "5D": ("5d", "15m"), "1M": ("1mo", "1h"), "3M": ("
           "6M": ("6mo", "1d"), "YTD": ("ytd", "1d"), "1Y": ("1y", "1d"), "2Y": ("2y", "1d"),
           "5Y": ("5y", "1wk"), "MAX": ("max", "1mo")}
 CHAIN_FIELDS = ["e", "strike", "put", "bid", "ask", "last", "chg", "vol", "oi", "lastTrade"]
+# Yahoo names a fund's sectors in its own shorthand. These are the names it uses for single stocks.
+SECTORS = {"technology": "Technology", "financial_services": "Financial Services", "healthcare": "Healthcare",
+           "consumer_cyclical": "Consumer Cyclical", "consumer_defensive": "Consumer Defensive",
+           "communication_services": "Communication Services", "industrials": "Industrials", "energy": "Energy",
+           "utilities": "Utilities", "realestate": "Real Estate", "basic_materials": "Basic Materials"}
+# What a fund is made of, grouped the way the Portfolio view shows it (keys are Yahoo's).
+ASSETS = {"Stocks": ("stockPosition",), "Bonds": ("bondPosition", "convertiblePosition"),
+          "Cash": ("cashPosition",), "Other": ("preferredPosition", "otherPosition")}
+FUND_LIKE = re.compile(r"\b(ETF|Fund|Index|Portfolio|Trust)\b", re.I)      # a fund inside another fund, by its name
 
 
 class ApiError(Exception):
@@ -108,6 +118,12 @@ def clean(x, digits=None):
     if v != v or v in (float("inf"), float("-inf")):
         return None
     return round(v, digits) if digits is not None else v
+
+
+def price_of(x):
+    """A price as a float or None: four decimals, or eight for the tiny prices some coins trade at."""
+    v = clean(x)
+    return None if v is None else round(v, 4 if abs(v) >= 1 else 8)
 
 
 def http_json(url, timeout=25):
@@ -185,19 +201,107 @@ def get_quote(symbol):
 
 
 def get_quotes(symbols):
-    """Light quotes for the watchlist."""
+    """Light quotes for the watchlist and the portfolio: price, currency and the day's change."""
     def one(symbol):
         def fetch():
             fast = yf.Ticker(symbol).fast_info
-            price, prev = clean(fast.last_price, 4), clean(fast.previous_close, 4)
-            return {"symbol": symbol, "price": price,
+            price, prev = price_of(fast.last_price), price_of(fast.previous_close)
+            return {"symbol": symbol, "price": price, "currency": fast.currency or None,
                     "changePct": round((price / prev - 1) * 100, 2) if price and prev else None}
         try:
             return cached(("lite", symbol), 30, fetch)
         except Exception:
-            return {"symbol": symbol, "price": None, "changePct": None}
+            return {"symbol": symbol, "price": None, "currency": None, "changePct": None}
     with ThreadPoolExecutor(8) as pool:
         return list(pool.map(one, symbols))
+
+
+def fund_makeup(sectors, assets):
+    """A fund's sector and asset split with our names, as shares of the fund that add up to about 1."""
+    share = lambda value: clean(value, 4) or 0
+    return ({SECTORS.get(key, key): share(v) for key, v in (sectors or {}).items() if share(v) > 0},
+            {name: round(sum(share((assets or {}).get(key)) for key in keys), 4) for name, keys in ASSETS.items()})
+
+
+def get_profile(symbol):
+    """What a holding is: type, currency, sector and country. For a fund, also what it holds inside."""
+    def fetch():
+        tk = yf.Ticker(symbol)
+        info = tk.info or {}
+        kind = (info.get("quoteType") or "").upper()
+        if not kind:
+            raise ApiError(f"Yahoo has no description of {symbol}.", 404)
+        out = {"symbol": symbol, "name": info.get("longName") or info.get("shortName") or symbol, "type": kind,
+               "currency": info.get("currency") or None, "sector": info.get("sector") or None,
+               "industry": info.get("industry") or None, "country": info.get("country") or None}
+        if kind in ("ETF", "MUTUALFUND"):
+            try:
+                fund = tk.funds_data
+                out["sectors"], out["assets"] = fund_makeup(fund.sector_weightings, fund.asset_classes)
+                out["top"] = [[str(sym), str(row["Name"]), clean(row["Holding Percent"], 4)]
+                              for sym, row in fund.top_holdings.iterrows()]
+            except Exception:       # Yahoo describes the fund but not its insides: it is shown as one block
+                out["sectors"], out["assets"], out["top"] = {}, {}, []
+            out["expense"] = clean(info.get("netExpenseRatio"))       # percent a year, e.g. 0.2
+        return out
+    return cached(("profile", symbol), 86400, fetch)
+
+
+def fund_insides(symbol, depth=2, seen=()):
+    """A fund's largest holdings as [symbol, name, share of the fund], with any fund among them opened up too.
+
+    A Canadian fund is often a wrapper around one US fund, or a basket of other funds, so its own
+    list names no companies. Yahoo lists ten holdings per fund, so the shares cover only part of it.
+    """
+    found = {}
+    for sym, name, share in get_profile(symbol).get("top") or []:
+        inner = []
+        if depth and share and sym not in seen and FUND_LIKE.search(name or ""):
+            try:
+                inner = fund_insides(sym, depth - 1, seen + (symbol,))
+            except Exception:       # it cannot be opened: it stays in the list as itself
+                inner = []
+        for inner_sym, inner_name, part in inner or [[sym, name, 1]]:
+            entry = found.setdefault(inner_sym, [inner_sym, inner_name, 0])
+            entry[2] = round(entry[2] + (share or 0) * part, 5)
+    return sorted(found.values(), key=lambda entry: -entry[2])[:25]
+
+
+def get_profiles(symbols):
+    """Profiles for several tickers. One that fails is reported in place, so the rest still arrive."""
+    def one(symbol):
+        try:
+            profile = get_profile(symbol)
+            return {**profile, "top": fund_insides(symbol)} if profile.get("top") else profile
+        except Exception as exc:
+            return {"symbol": symbol, "error": str(exc) or type(exc).__name__}
+    with ThreadPoolExecutor(8) as pool:
+        return list(pool.map(one, symbols))
+
+
+_download_lock = threading.Lock()      # yfinance's bulk download keeps its results in one shared place
+
+
+def get_closes(symbols, rng):
+    """Daily closes for several tickers on one shared calendar, for measuring how they move together.
+
+    Weekdays only (a coin's weekend move lands on Monday), adjusted for splits and dividends. A day
+    one market was shut repeats its last close; days before a ticker first traded are None.
+    """
+    if not symbols:
+        raise ApiError("No tickers given.", 400)
+
+    def fetch():
+        with _download_lock:
+            frame = yf.download(symbols, period=RANGES[rng][0], interval="1d", auto_adjust=True,
+                                progress=False, threads=True)["Close"]
+        frame = frame[frame.index.dayofweek < 5].dropna(how="all").ffill()
+        closes = {s: [None if v != v else float(f"{v:.8g}") for v in frame[s]]
+                  for s in symbols if s in frame and frame[s].notna().any()}
+        if not closes:
+            raise ApiError("No price history for these tickers.", 404)
+        return {"range": rng, "dates": [day.strftime("%Y-%m-%d") for day in frame.index], "closes": closes}
+    return cached(("closes", rng, tuple(sorted(symbols))), 900, fetch)
 
 
 def get_history(symbol, rng):
@@ -390,6 +494,11 @@ class Handler(BaseHTTPRequestHandler):
             if not SYMBOL.fullmatch(s):
                 raise ApiError("That does not look like a ticker.", 400)
             return s
+
+        def symbols(limit=40):
+            """The tickers of a comma-separated list: the valid ones, no repeats, at most `limit`."""
+            wanted = [s.strip() for s in arg("symbols").upper().split(",")]
+            return list(dict.fromkeys(s for s in wanted if SYMBOL.fullmatch(s)))[:limit]
         try:
             if name == "quote":
                 out = get_quote(symbol())
@@ -401,10 +510,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError("Unknown range.", 400)
                 out = get_history(symbol(), rng)
             elif name == "quotes":
-                wanted = [s.strip() for s in arg("symbols").upper().split(",")]
-                # Valid, no repeats, at most 40.
-                symbols = list(dict.fromkeys(s for s in wanted if SYMBOL.fullmatch(s)))[:40]
-                out = {"quotes": get_quotes(symbols)}
+                out = {"quotes": get_quotes(symbols())}
+            elif name == "profiles":
+                out = {"profiles": get_profiles(symbols())}
+            elif name == "closes":
+                rng = arg("range", "1Y").upper()
+                if RANGES.get(rng, ("", ""))[1] != "1d":
+                    raise ApiError("Unknown range.", 400)
+                out = get_closes(symbols(60), rng)
             elif name == "search":
                 q = arg("q")[:50]
                 out = search(q) if q else {"results": []}
@@ -440,6 +553,12 @@ class Handler(BaseHTTPRequestHandler):
 def _check():
     """Quick self-test of the parsing rules, run at every start. A failure here stops the server with a traceback."""
     assert clean("--") is None and clean("1,234.5") == 1234.5 and clean(float("nan")) is None and clean("0.30") == 0.3
+    assert price_of(716.70321) == 716.7032 and price_of(0.0000123456789) == 0.00001235 and price_of("--") is None
+    sectors, assets = fund_makeup({"technology": 0.58, "energy": 0.0, "made_up": 0.1},
+                                  {"stockPosition": 0.6, "bondPosition": 0.3, "convertiblePosition": 0.05,
+                                   "cashPosition": float("nan")})
+    assert sectors == {"Technology": 0.58, "made_up": 0.1}
+    assert assets == {"Stocks": 0.6, "Bonds": 0.35, "Cash": 0, "Other": 0}
     assert (SYMBOL.fullmatch("BRK-B") and SYMBOL.fullmatch("^SPX")
             and not SYMBOL.fullmatch("AA\n") and not SYMBOL.fullmatch("../X"))
     m = OCC_URL.search("/market-activity/stocks/gemi/option-chain/call-put-options/gemi--261204c00001500")

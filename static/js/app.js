@@ -1,5 +1,7 @@
 // App core: state, data loading, routing, command line, watchlist, keyboard and the page chrome.
 // Each view is a function render(root, ctx) in a views-*.js module.
+// The Portfolio view is the one view that is not about the ticker on screen: it keeps its holdings
+// in app.portfolio and fetches its own market data (see views-portfolio.js).
 //
 // How a screen comes about:
 //   1. load(symbol) asks the server for the quote, the option chain and a year of prices.
@@ -37,6 +39,8 @@ import * as chainView from './views-chain.js';
 import * as volView from './views-vol.js';
 import * as stratView from './views-strategy.js';
 import * as learn from './learn.js';
+import * as portfolioView from './views-portfolio.js';
+import { cleanHolding } from './portfolio.js';
 
 const VIEWS = [
   { id: 'overview', label: 'OVERVIEW', render: market.overview },
@@ -47,7 +51,9 @@ const VIEWS = [
   { id: 'strategy', label: 'STRATEGY', render: stratView.strategy },
   { id: 'calc', label: 'CALCULATOR', render: stratView.calc },
   { id: 'learn', label: 'LEARN', render: learn.render },
+  { id: 'portfolio', label: 'PORTFOLIO', render: portfolioView.render },
 ];
+const STANDALONE = ['portfolio']; // views that are not about the ticker on screen, so they need none loaded
 // Words that switch view. Short codes only count after a ticker ("SPY OC"), so that real tickers
 // such as PL or OC still load when typed on their own.
 const WORDS = {
@@ -58,6 +64,7 @@ const WORDS = {
   STRATEGY: 'strategy',
   CALCULATOR: 'calc',
   LEARN: 'learn',
+  PORTFOLIO: 'portfolio',
 };
 const CODES = {
   ...WORDS,
@@ -77,6 +84,7 @@ const CODES = {
   PL: 'strategy',
   CALC: 'calc',
   EDU: 'learn',
+  PORT: 'portfolio',
 };
 const DEFAULT_WATCH = ['SPY', 'QQQ', 'IWM', '^SPX', '^VIX', 'AAPL', 'NVDA', 'TSLA'];
 const MAX_WATCH = 40; // the server prices at most this many tickers in one request
@@ -99,6 +107,17 @@ const stored = (key, fallback, valid) => {
   return valid(v) ? v : fallback;
 };
 const cleanLegs = legs => (Array.isArray(legs) ? legs.filter(M.validLeg) : []);
+const MAX_HOLDINGS = 400;
+/** The portfolio as it is kept: valid holdings only, numbered afresh, with the date of the file they came from. */
+const cleanPortfolio = p => ({
+  holdings: (Array.isArray(p?.holdings) ? p.holdings : [])
+    .map(cleanHolding)
+    .filter(Boolean)
+    .slice(0, MAX_HOLDINGS)
+    .map((holding, i) => ({ ...holding, id: 'h' + (i + 1) })),
+  asOf: /^\d{4}-\d{2}-\d{2}$/.test(p?.asOf) ? p.asOf : null,
+  importedAt: Number.isFinite(p?.importedAt) ? p.importedAt : null,
+});
 
 export const app = {
   // --- what is on screen
@@ -134,6 +153,7 @@ export const app = {
     .filter(s => s.legs.length),
   lesson: stored('lesson', 'basics', v => typeof v === 'string'),
   done: stored('done', {}, isObj), // lessons marked as read
+  portfolio: cleanPortfolio(stored('portfolio', {}, isObj)), // holdings imported for the Portfolio view
   autoRefresh: stored('auto', true, v => typeof v === 'boolean'),
   text: stored('text', 1, v => TEXT_SIZES.some(size => size[0] === v)), // text size multiplier (the A A A control)
 };
@@ -236,6 +256,11 @@ const ctx = {
   markDone(id) {
     app.done[id] = true;
     disk.set('done', app.done);
+  },
+  /** Replace the holdings of the Portfolio view: { holdings, asOf, importedAt }. */
+  setPortfolio(portfolio) {
+    app.portfolio = cleanPortfolio(portfolio);
+    disk.set('portfolio', app.portfolio);
   },
   setLesson(id) {
     app.lesson = id;
@@ -700,7 +725,7 @@ function renderStatus() {
       ' command  ',
       h('kbd', null, '1'),
       '–',
-      h('kbd', null, '8'),
+      h('kbd', null, String(VIEWS.length)),
       ' views  ',
       h('kbd', null, '['),
       h('kbd', null, ']'),
@@ -788,9 +813,10 @@ function renderView() {
   const root = $('view'),
     old = document.querySelector('.chain-wrap'),
     keep = old && [old.scrollTop, old.scrollLeft];
+  const needsTicker = !STANDALONE.includes(app.view);
   keepFocus(() => {
     mount(root);
-    if (app.pending)
+    if (app.pending && needsTicker)
       append(
         root,
         skeleton(`Loading ${app.pending}…`, 7, 's7'),
@@ -798,7 +824,7 @@ function renderView() {
         skeleton('Price', 5, 's7'),
         skeleton('Expiries', 5, 's5'),
       );
-    else if (!app.quote)
+    else if (!app.quote && needsTicker)
       append(
         root,
         app.error ? errorBanner() : null,
@@ -1064,7 +1090,7 @@ function showHelp() {
         ),
         row(
           'SPY CHAIN ⏎',
-          'Add a view after the ticker to land on it: OVERVIEW (OV), PRICE (GP), CHAIN (OC), VOLATILITY (VOL), OI, STRATEGY (STRAT), CALCULATOR (CALC), LEARN. A view word on its own (CHAIN) switches view. Open interest needs the ticker first (SPY OI) or the 5 key, because OI alone is a ticker.',
+          'Add a view after the ticker to land on it: OVERVIEW (OV), PRICE (GP), CHAIN (OC), VOLATILITY (VOL), OI, STRATEGY (STRAT), CALCULATOR (CALC), LEARN, PORTFOLIO (PORT). A view word on its own (CHAIN) switches view. Open interest needs the ticker first (SPY OI) or the 5 key, because OI alone is a ticker.',
         ),
         row(
           'HELP  GLOSSARY  REFRESH',
@@ -1074,7 +1100,7 @@ function showHelp() {
           '/',
           'Jump to the command line. With nothing typed it lists recent tickers, which open instantly. The command bar hides as you scroll down a page and returns when you scroll up or press this key.',
         ),
-        row('1 … 8', "Switch view. The browser's Back button steps back through the views and tickers you visited."),
+        row('1 … 9', "Switch view. The browser's Back button steps back through the views and tickers you visited."),
         row('[  ]', 'Previous and next expiry.'),
         row(
           '← ↑ ↓ →',
@@ -1088,7 +1114,7 @@ function showHelp() {
       h(
         'p',
         { class: 'note' },
-        'The address bar holds the ticker, the view, the expiry, the selected contract, the legs of a strategy and the lesson: bookmark it or copy it to come straight back. Other settings (calculator inputs, chart range, columns, text size) and your watch list, saved positions and lesson progress are remembered by this browser only.',
+        'The address bar holds the ticker, the view, the expiry, the selected contract, the legs of a strategy and the lesson: bookmark it or copy it to come straight back. Other settings (calculator inputs, chart range, columns, text size) and your watch list, saved positions, portfolio holdings and lesson progress are remembered by this browser only.',
       ),
       h(
         'p',
@@ -1098,12 +1124,17 @@ function showHelp() {
       h(
         'p',
         { class: 'note' },
+        'The Portfolio view (9) works on the holdings you import from a holdings report (CSV), such as the one Wealthsimple lets you download. The file is read in this browser and is not uploaded: only ticker symbols are sent out, to fetch prices. It shows what the holdings are worth, where the money really is once funds are opened up, and how diversified it is.',
+      ),
+      h(
+        'p',
+        { class: 'note' },
         'The screen refreshes every minute while auto-refresh is ticked. It pauses on the Learn, Calculator and Strategy views and while a slider has the focus, so nothing moves under your hands.',
       ),
       h(
         'p',
         { class: 'note' },
-        "Data: option chains come from Nasdaq's public feed, and from Yahoo Finance when Nasdaq has none (most indexes); the status bar names the source. Prices, history and search come from Yahoo Finance. Everything is delayed about 15 minutes and comes without any guarantee. Volatility and Greeks are computed here from bid and ask prices; when the market is closed they are worked out as of the last close.",
+        "Data: option chains come from Nasdaq's public feed, and from Yahoo Finance when Nasdaq has none (most indexes); the status bar names the source. Prices, history, search and what each fund holds come from Yahoo Finance. Everything is delayed about 15 minutes and comes without any guarantee. Volatility and Greeks are computed here from bid and ask prices; when the market is closed they are worked out as of the last close.",
       ),
       h(
         'p',
@@ -1190,8 +1221,10 @@ function start() {
     // user: on the views that are all inputs, with a dialog open, or while a slider has the focus.
     const busy =
       ['learn', 'calc', 'strategy'].includes(app.view) || modalOpen() || document.activeElement?.type === 'range';
-    if (app.autoRefresh && document.visibilityState === 'visible' && app.symbol && !app.loading && !busy)
-      load(app.symbol, { quiet: true });
+    if (!app.autoRefresh || document.visibilityState !== 'visible' || busy) return;
+    // The Portfolio view fetches its own prices when it is drawn, so drawing it again is its refresh.
+    if (STANDALONE.includes(app.view)) renderView();
+    else if (app.symbol && !app.loading) load(app.symbol, { quiet: true });
   }, 60000);
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
