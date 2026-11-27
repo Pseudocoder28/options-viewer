@@ -130,6 +130,8 @@ export function plot(el, traces, layout = {}, config = {}) {
     full.xaxis ??= {};
     full.yaxis ??= {};
   }
+  // A 3D chart is turned by dragging. Without this it inherits "no dragging" from the defaults above.
+  if (full.scene) full.scene.dragmode ??= 'turntable';
   for (const key of Object.keys(full))
     if (/^[xy]axis\d*$/.test(key)) full[key] = merge(structuredClone(AXIS), full[key]);
   const k = textScale();

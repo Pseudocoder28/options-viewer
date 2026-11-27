@@ -36,6 +36,7 @@ const OI_WINDOWS = [
 ];
 const TIME_EXPIRIES = 30; // "open interest by expiry" shows this many expiries at most
 let surfaceCamera = null; // where the 3D surface was left: { symbol, camera }. Kept across refreshes, never saved.
+let surfaceLive = false; // clicked since the pointer came onto the 3D surface? Only then does the wheel zoom it.
 /** Position of a value on a category axis whose categories are the sorted numbers in `cats`. */
 function catPos(cats, v) {
   if (v <= cats[0]) return 0;
@@ -138,7 +139,7 @@ export function vol(root, ctx) {
       { cls: 's6', code: 'SURF' },
       surf,
       note(
-        'Strike across, time back, volatility up: every quote in one picture. Drag to rotate, scroll to zoom. Points are real quotes; the sheet joins them.',
+        'Strike across, time back, volatility up: every quote in one picture. Drag to rotate. Click it, then scroll to zoom. Points are real quotes; the sheet joins them.',
       ),
     ),
   );
@@ -304,6 +305,11 @@ export function vol(root, ctx) {
       surf.on?.('plotly_relayout', change => {
         if (change['scene.camera']) surfaceCamera = { symbol: app.symbol, camera: change['scene.camera'] };
       });
+      // The wheel zooms the surface only after a click or drag on it. Before that, and once the pointer has
+      // left, the wheel is stopped on its way down to the chart, so it scrolls the page as usual.
+      surf.addEventListener('pointerdown', () => (surfaceLive = true));
+      surf.addEventListener('pointerleave', () => (surfaceLive = false));
+      surf.addEventListener('wheel', e => surfaceLive || e.stopPropagation(), { capture: true });
     });
 
   // --- table
