@@ -108,7 +108,7 @@ const stored = (key, fallback, valid) => {
 };
 const cleanLegs = legs => (Array.isArray(legs) ? legs.filter(M.validLeg) : []);
 const MAX_HOLDINGS = 400;
-/** The portfolio as it is kept: valid holdings only, numbered afresh, with the date of the file they came from. */
+/** The portfolio as it is kept: valid holdings only, numbered afresh, with the date they are as of. */
 const cleanPortfolio = p => ({
   holdings: (Array.isArray(p?.holdings) ? p.holdings : [])
     .map(cleanHolding)
@@ -117,6 +117,7 @@ const cleanPortfolio = p => ({
     .map((holding, i) => ({ ...holding, id: 'h' + (i + 1) })),
   asOf: /^\d{4}-\d{2}-\d{2}$/.test(p?.asOf) ? p.asOf : null,
   importedAt: Number.isFinite(p?.importedAt) ? p.importedAt : null,
+  syncedAt: Number.isFinite(p?.syncedAt) ? p.syncedAt : null, // when the brokerage link last read them, if it did
 });
 
 export const app = {
@@ -161,10 +162,16 @@ const recent = new Map(); // ticker -> { quote, chain, chainError, hv, loadedAt,
 let loadToken = 0,
   rerenderTimer = 0;
 
-async function api(path) {
+/** Ask the local server. With a payload, the request is a POST that carries it as JSON. */
+async function api(path, payload) {
   let res;
   try {
-    res = await fetch(path);
+    res = await fetch(
+      path,
+      payload === undefined
+        ? undefined
+        : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+    );
   } catch {
     throw new Error(
       'Cannot reach the local data server. Open the Options Terminal app again (or run "uv run server.py") to restart it.',
@@ -1124,7 +1131,7 @@ function showHelp() {
       h(
         'p',
         { class: 'note' },
-        'The Portfolio view (9) works on the holdings you import from a holdings report (CSV), such as the one Wealthsimple lets you download. The file is read in this browser and is not uploaded: only ticker symbols are sent out, to fetch prices. It shows what the holdings are worth, where the money really is once funds are opened up, and how diversified it is.',
+        'The Portfolio view (9) works on the holdings you import from a holdings report (CSV), such as the one Wealthsimple lets you download. The file is read in this browser and is not uploaded: only ticker symbols are sent out, to fetch prices. LIVE LINK on that view reads the holdings straight from your brokerage instead, through SnapTrade, for reading only. The view shows what the holdings are worth, where the money really is once funds are opened up, and how diversified it is.',
       ),
       h(
         'p',

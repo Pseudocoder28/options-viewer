@@ -14,13 +14,17 @@ Data sources (free, no key, about 15 minutes delayed):
                   Yahoo Finance is the fallback: indexes (SPX, VIX, NDX, RUT) and anything Nasdaq lacks.
   quotes, price history, ticker search, risk-free rate   Yahoo Finance (through yfinance)
   what a holding is (sector, country) and what a fund holds inside   Yahoo Finance (through yfinance)
+  holdings at your brokerage (optional, only once you link it)   SnapTrade, read-only
 
 To add a real-time source, write one more chain_<name>(symbol, kind) that returns the same
 row dicts as chain_nasdaq and put it first in get_chain().
 """
 import argparse
+import base64
 import datetime as dt
 import gzip
+import hashlib
+import hmac
 import json
 import mimetypes
 import os
@@ -28,6 +32,7 @@ import re
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -63,6 +68,11 @@ SECTORS = {"technology": "Technology", "financial_services": "Financial Services
 # What a fund is made of, grouped the way the Portfolio view shows it (keys are Yahoo's).
 ASSETS = {"Stocks": ("stockPosition",), "Bonds": ("bondPosition", "convertiblePosition"),
           "Cash": ("cashPosition",), "Other": ("preferredPosition", "otherPosition")}
+# The optional brokerage link. Its keys live outside this folder, so they can never end up in git.
+CONFIG = Path(os.environ.get("OPTIONS_TERMINAL_CONFIG") or Path.home() / ".config" / "options-terminal")
+SNAPTRADE_KEYS = CONFIG / "snaptrade.json"
+SNAPTRADE_URL = os.environ.get("SNAPTRADE_URL", "https://api.snaptrade.com")       # another address only in tests
+UUID = re.compile(r"[0-9a-fA-F-]{8,64}")                           # an account id as SnapTrade writes it
 FUND_LIKE = re.compile(r"\b(ETF|Fund|Index|Portfolio|Trust)\b", re.I)      # a fund inside another fund, by its name
 
 
@@ -422,6 +432,129 @@ def get_chain(symbol):
     return cached(("chain", symbol), 60, fetch)
 
 
+# ---------------------------------------------------------------- brokerage link (SnapTrade)
+# Optional. With a personal SnapTrade key saved on this machine, the Portfolio view reads holdings
+# straight from the brokerage instead of from a file. Every call made here only reads: accounts,
+# positions, cash and the state of the connection. Nothing in this file can place an order.
+
+def snaptrade_keys():
+    """The saved keys as (client id, consumer key), or None when the link has not been set up."""
+    try:
+        saved = json.loads(SNAPTRADE_KEYS.read_text())
+        return str(saved["clientId"]), str(saved["consumerKey"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def snaptrade_signature(consumer_key, path, query, body=None):
+    """What SnapTrade expects in the Signature header: an HMAC of the request's body, path and query string."""
+    signed = json.dumps({"content": body or None, "path": path, "query": query}, separators=(",", ":"), sort_keys=True)
+    return base64.b64encode(hmac.new(consumer_key.encode(), signed.encode(), hashlib.sha256).digest()).decode()
+
+
+def snaptrade(method, path, body=None, keys=None):
+    """One signed call to SnapTrade. When it refuses, the ApiError carries SnapTrade's own explanation."""
+    keys = keys or snaptrade_keys()
+    if not keys:
+        raise ApiError("The live link is not set up.", 409)
+    query = urllib.parse.urlencode({"clientId": keys[0], "timestamp": int(time.time())})
+    req = urllib.request.Request(
+        f"{SNAPTRADE_URL}{path}?{query}", method=method,
+        data=json.dumps(body, separators=(",", ":"), sort_keys=True).encode() if body else None,
+        headers={**HEADERS, "Content-Type": "application/json",
+                 "Signature": snaptrade_signature(keys[1], path, query, body)})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read() or b"null")
+    except urllib.error.HTTPError as exc:
+        try:
+            said = json.loads(exc.read())
+            said = said if isinstance(said, dict) else {}
+            detail = said.get("detail") or said.get("message") or said.get("error")
+        except ValueError:
+            detail = None
+        if exc.code == 429:
+            raise ApiError("SnapTrade asks for a pause between requests. Try again in a minute.", 429)
+        hint = " Check that both key values were pasted in full." if exc.code in (401, 403) else ""
+        raise ApiError(f"SnapTrade refused the request ({exc.code}): {detail or exc.reason}.{hint}")
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise ApiError(f"SnapTrade could not be reached: {getattr(exc, 'reason', exc)}")
+
+
+def snaptrade_status():
+    """Whether the link is set up, and the brokerage connections behind it. Never includes the keys."""
+    if not snaptrade_keys():
+        return {"linked": False, "connections": []}
+    try:
+        found = snaptrade("GET", "/authorizations") or []
+    except ApiError as exc:
+        return {"linked": True, "connections": [], "error": str(exc)}
+    return {"linked": True, "connections": [
+        {"name": (c.get("brokerage") or {}).get("display_name") or c.get("name") or "Brokerage",
+         "canTrade": c.get("type") == "trade", "broken": bool(c.get("disabled")),
+         "delayed": (c.get("data_freshness_mode") or {}).get("snaptrade") == "delayed"}
+        for c in found if isinstance(c, dict)]}
+
+
+def snaptrade_holdings():
+    """Positions and cash of every open investment account, as SnapTrade reports them.
+
+    Account numbers are left behind: the page gets each account's name and what is in it.
+    """
+    def fetch():
+        accounts = [a for a in (snaptrade("GET", "/accounts/all") or {}).get("results") or []
+                    if a.get("kind") == "investment" and a.get("status") not in ("closed", "archived")
+                    and UUID.fullmatch(str(a.get("id")))]
+        if not accounts:      # an error is never cached, so the next try after connecting sees the new accounts
+            raise ApiError("SnapTrade reports no investment accounts yet. Connect your brokerage first. "
+                           "Right after connecting, the first read can take a minute.", 409)
+
+        def one(account):
+            held = snaptrade("GET", f"/accounts/{account['id']}/positions/all") or {}
+            try:
+                cash = snaptrade("GET", f"/accounts/{account['id']}/balances") or []
+            except ApiError:      # positions matter more: an account whose cash cannot be read still shows
+                cash = []
+            return {"name": account.get("display_name") or account.get("raw_type") or "Account",
+                    "asOf": (held.get("data_freshness") or {}).get("as_of"),
+                    "positions": held.get("results") or [],
+                    "cash": [{"currency": (b.get("currency") or {}).get("code"), "amount": clean(b.get("cash"))}
+                             for b in cash if isinstance(b, dict)]}
+        with ThreadPoolExecutor(3) as pool:
+            return {"accounts": list(pool.map(one, accounts)), "fetchedAt": int(time.time())}
+    return cached(("snaptrade", "holdings"), 120, fetch)
+
+
+def snaptrade_portal():
+    """A one-time address at SnapTrade for connecting a brokerage. It asks for data access only."""
+    url = (snaptrade("POST", "/snapTrade/login", {"connectionType": "read"}) or {}).get("redirectURI") or ""
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if not (host.endswith(".snaptrade.com") or host == urllib.parse.urlsplit(SNAPTRADE_URL).hostname):
+        raise ApiError("SnapTrade did not return a connection page.")
+    return {"url": url}
+
+
+def snaptrade_save(client_id, consumer_key):
+    """Keep the keys on this machine, readable by this user only. A pair that SnapTrade rejects is not kept."""
+    keys = (str(client_id or "").strip(), str(consumer_key or "").strip())
+    if not all(keys) or max(map(len, keys)) > 300:
+        raise ApiError("Paste both the client ID and the consumer key.", 400)
+    snaptrade("GET", "/authorizations", keys=keys)
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    with os.fdopen(os.open(SNAPTRADE_KEYS, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as out:
+        json.dump({"clientId": keys[0], "consumerKey": keys[1]}, out)
+    os.chmod(SNAPTRADE_KEYS, 0o600)       # the mode above only applies to a file that is new
+    _cache.pop(("snaptrade", "holdings"), None)
+    return snaptrade_status()
+
+
+def snaptrade_forget():
+    """Remove the keys from this machine. The connection itself is removed in SnapTrade's dashboard."""
+    SNAPTRADE_KEYS.unlink(missing_ok=True)
+    _cache.pop(("snaptrade", "holdings"), None)
+    return {"linked": False, "connections": []}
+
+
 # ---------------------------------------------------------------- http
 
 class Server(ThreadingHTTPServer):
@@ -485,6 +618,46 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def do_POST(self):
+        """The few requests that change something: saving or removing the brokerage keys, opening a connection page."""
+        _last_request[0] = time.time()
+        name = urllib.parse.urlsplit(self.path).path.removeprefix("/api/")
+        length = self.headers.get("Content-Length") or "0"
+        size = int(length) if length.isdigit() else -1
+        try:
+            # A page on another site can post a plain form without asking first, but not JSON: so JSON is required.
+            if not self.from_this_app() or not (self.headers.get("Content-Type") or "").startswith("application/json"):
+                self.close_connection = True
+                return self.send_json({"error": "This server only answers its own page."}, 403)
+            if not 0 <= size <= 4096:
+                self.close_connection = True
+                return self.send_json({"error": "That request is too large."}, 413)
+            try:
+                body = json.loads(self.rfile.read(size) or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("not an object")
+                if name == "snaptrade/keys":
+                    out = snaptrade_save(body.get("clientId"), body.get("consumerKey"))
+                elif name == "snaptrade/portal":
+                    out = snaptrade_portal()
+                elif name == "snaptrade/forget":
+                    out = snaptrade_forget()
+                else:
+                    raise ApiError("Unknown endpoint.", 404)
+                status = 200
+            except ApiError as exc:
+                out, status = {"error": str(exc)}, exc.status
+            except ValueError:
+                out, status = {"error": "That request could not be read."}, 400
+            except Exception as exc:
+                out, status = {"error": f"{type(exc).__name__}: {exc}"}, 502
+            self.send_json(out, status)
+            # The body is never logged: it can hold the keys.
+            print(f"{status} POST /api/{name}" + (f" error={out['error']}" if status != 200 else ""),
+                  file=sys.stderr, flush=True)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def api(self, name, query):
         started = time.time()
         arg = lambda key, default="": (query.get(key) or [default])[0].strip()
@@ -521,6 +694,10 @@ class Handler(BaseHTTPRequestHandler):
             elif name == "search":
                 q = arg("q")[:50]
                 out = search(q) if q else {"results": []}
+            elif name == "snaptrade":
+                out = snaptrade_status()
+            elif name == "snaptrade/holdings":
+                out = snaptrade_holdings()
             else:
                 raise ApiError("Unknown endpoint.", 404)
             status = 200
@@ -554,6 +731,11 @@ def _check():
     """Quick self-test of the parsing rules, run at every start. A failure here stops the server with a traceback."""
     assert clean("--") is None and clean("1,234.5") == 1234.5 and clean(float("nan")) is None and clean("0.30") == 0.3
     assert price_of(716.70321) == 716.7032 and price_of(0.0000123456789) == 0.00001235 and price_of("--") is None
+    # SnapTrade's signature: the example from its documentation, checked against openssl.
+    assert snaptrade_signature("secret", "/symbols", "clientId=YOUR_CLIENT_ID&timestamp=1715123456",
+                               {"substring": "AAPL"}) == "NDXBE2rcbQ4APOILcfKnkSW4ZZm5uRQ+HKvYzj6CRC0="
+    assert snaptrade_signature("secret", "/accounts/all", "clientId=abc&timestamp=1") == (
+        "2mYwtnJQ0o8xYMp1EldIPmAJUOKglETjgGwLV4QMI0k=")
     sectors, assets = fund_makeup({"technology": 0.58, "energy": 0.0, "made_up": 0.1},
                                   {"stockPosition": 0.6, "bondPosition": 0.3, "convertiblePosition": 0.05,
                                    "cashPosition": float("nan")})

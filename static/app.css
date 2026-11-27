@@ -1959,3 +1959,11 @@ h2.sub {
     display: none;
   }
 }
+a.btn {
+  display: inline-block;
+  text-decoration: none;
+}
+.form .row small {
+  flex-basis: 100%;
+  font-size: calc(11.5px * var(--text));
+}

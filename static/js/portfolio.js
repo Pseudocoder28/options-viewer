@@ -4,15 +4,17 @@
 //
 // The shapes this file works with:
 //
-//   holding   { id, symbol, raw, name, kind, qty, currency, cost, costCAD, filePrice, fileValue, account, option }
+//   holding   { id, symbol, raw, name, kind, qty, currency, cost, costCAD, filePrice, fileValue, account, option,
+//               source }
 //               symbol                the ticker as Yahoo writes it (SHOP.TO, BTC-CAD); null when it has no live price
 //               raw                   the symbol as the file wrote it
-//               kind                  'stock' | 'fund' | 'crypto' | 'option' | 'other'
+//               kind                  'stock' | 'fund' | 'crypto' | 'option' | 'cash' | 'other'
 //               qty                   shares, coins or contracts; negative for a short position
 //               cost, costCAD         what the whole position cost (its book value): in `currency`, and in
 //                                     Canadian dollars when the file says so
 //               filePrice, fileValue  the price and value the file stated: used when there is no live price
 //               option                { underlying, expiry: 'YYYY-MM-DD', strike, put, occ } for an option, else null
+//               source                'file' (imported) | 'hand' (typed in) | 'broker' (read from the brokerage link)
 //
 //   market    { quotes: { SYM: { price, changePct, currency } }, usdcad, usdcadChangePct,
 //               options: { OCC: { mark, chg, delta, gamma, theta, vega, spot, iv } } }
@@ -21,7 +23,8 @@
 //   profile   what /api/profiles says about a ticker: { type, sector, country, sectors, assets, top }
 import { occSymbol, MULT } from './model.js';
 
-export const KINDS = ['stock', 'fund', 'crypto', 'option', 'other'];
+export const KINDS = ['stock', 'fund', 'crypto', 'option', 'cash', 'other'];
+export const SOURCES = ['file', 'hand', 'broker']; // where a holding came from
 export const BASES = ['CAD', 'USD'];
 export const FX = 'CAD=X'; // Yahoo's ticker for Canadian dollars per US dollar
 export const BENCHMARKS = { 'S&P 500': '^GSPC', TSX: '^GSPTSE' }; // the yardsticks a portfolio is compared with
@@ -204,6 +207,7 @@ export function readHoldings(text) {
         fileValue: amount(at('value')),
         account: at('account') || null,
         option,
+        source: 'file',
       });
     }
   }
@@ -234,7 +238,136 @@ export function cleanHolding(h) {
     fileValue: number(h.fileValue),
     account: text(h.account, 60),
     option,
+    source: SOURCES.includes(h.source) ? h.source : 'file',
   };
+}
+// ---------------------------------------------------------------- holdings from a brokerage link
+
+// SnapTrade's names for what a position is, and ours.
+const BROKER_KINDS = {
+  stock: 'stock',
+  adr: 'stock',
+  preferred_stock: 'stock',
+  etf: 'fund',
+  mutualfund: 'fund',
+  cef: 'fund',
+  crypto: 'crypto',
+  option: 'option',
+};
+/**
+ * The option contract described somewhere inside a position's instrument. The exchange code
+ * (AAPL  261218C00200000) is looked for in every piece of text, whatever its field is called;
+ * failing that, separate strike, expiry, type and underlying fields are put together.
+ */
+function findOption(instrument) {
+  const texts = [],
+    fields = {};
+  (function walk(node, depth) {
+    if (depth > 4 || node == null) return;
+    if (typeof node === 'string') texts.push(node);
+    else if (typeof node === 'object')
+      for (const [key, value] of Object.entries(node)) {
+        if (value != null && typeof value !== 'object') fields[key.toLowerCase()] ??= value;
+        walk(value, depth + 1);
+      }
+  })(instrument, 0);
+  for (const text of texts) {
+    const found = parseOption(text);
+    if (found) return found;
+  }
+  const pick = pattern => Object.entries(fields).find(([key]) => pattern.test(key))?.[1];
+  const type = String(pick(/option_?type|put_?call|^right$/) ?? '').toUpperCase();
+  const underlying =
+    instrument?.underlying_symbol?.raw_symbol || instrument?.underlying_symbol?.symbol || pick(/underlying/);
+  if (!/^(P|C|PUT|CALL)$/.test(type) || typeof underlying !== 'string') return null;
+  return makeOption(underlying, String(pick(/expir/) ?? '').slice(0, 10), Number(pick(/strike/)), type[0] === 'P');
+}
+
+/**
+ * Holdings read from a brokerage link: what /api/snaptrade/holdings sends, which is
+ * { accounts: [{ name, asOf, positions, cash: [{ currency, amount }] }] } with positions as SnapTrade
+ * writes them. Returns what readHoldings returns: { holdings, skipped, asOf }.
+ * A position's cost comes per share from the brokerage and is kept here as a total, like a file's.
+ */
+export function fromBroker(data) {
+  const holdings = [],
+    skipped = [];
+  let asOf = null;
+  const add = holding =>
+    holdings.push({ id: 'h' + (holdings.length + 1), costCAD: null, source: 'broker', ...holding });
+  const number = v => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+  const code = v => (/^[A-Za-z]{3}$/.test(v ?? '') ? v.toUpperCase() : null);
+  for (const account of data?.accounts || []) {
+    const name = typeof account.name === 'string' && account.name.trim() ? account.name.trim() : null;
+    if (typeof account.asOf === 'string' && account.asOf.slice(0, 10) > (asOf || '')) asOf = account.asOf.slice(0, 10);
+    for (const p of account.positions || []) {
+      const ins = p?.instrument || {},
+        kind = BROKER_KINDS[ins.kind] || 'other';
+      if (ins.kind === 'cash') continue; // cash is read from the account's balances below
+      const raw = String(ins.raw_symbol || ins.symbol || '')
+        .trim()
+        .toUpperCase();
+      const units = number(p.units),
+        price = number(p.price),
+        each = number(p.cost_basis);
+      const label = [raw, ins.description].filter(Boolean).join(' ').slice(0, 90) || 'A position';
+      if (!raw && kind !== 'option') skipped.push({ text: label, reason: 'It has no symbol.' });
+      else if (!units) skipped.push({ text: label, reason: 'It has no quantity.' });
+      else {
+        const currency = code(p.currency) || code(ins.currency);
+        const option = kind === 'option' ? findOption(ins) : null;
+        const mult = kind === 'option' ? MULT : 1;
+        // The brokerage's own exchange code decides the ticker. Without one, its formatted symbol is used as it is.
+        const ticker = ins.exchange
+          ? yahooSymbol(raw, { mic: String(ins.exchange), kind, currency })
+          : yahooSymbol(ins.symbol || raw, { kind, currency });
+        const shown = option ? option.occ : raw || 'OPTION'; // what the row is called when there is no description
+        add({
+          symbol: option ? option.underlying : kind === 'option' || kind === 'other' ? null : ticker,
+          raw: shown,
+          name: typeof ins.description === 'string' && ins.description.trim() ? ins.description.trim() : shown,
+          kind,
+          qty: units,
+          currency,
+          cost: each == null ? null : each * units * mult,
+          filePrice: price,
+          fileValue: price == null ? null : price * units * mult,
+          account: name,
+          option,
+        });
+      }
+    }
+    for (const c of account.cash || []) {
+      const amount = number(c?.amount),
+        currency = code(c?.currency);
+      if (amount && currency)
+        add({
+          symbol: null,
+          raw: 'CASH ' + currency,
+          name: 'Cash',
+          kind: 'cash',
+          qty: amount,
+          currency,
+          cost: null,
+          filePrice: 1,
+          fileValue: amount,
+          account: name,
+          option: null,
+        });
+    }
+  }
+  return { holdings, skipped, asOf };
+}
+
+/**
+ * The holdings after a sync: everything the brokerage reported, plus the ones added by hand that
+ * it did not report (an option it could not describe, something held elsewhere). Holdings that
+ * came from a file are dropped: the brokerage is now the record.
+ */
+export function afterSync(synced, current) {
+  const key = h => (h.option ? h.option.occ : h.symbol || h.raw);
+  const reported = new Set(synced.map(key));
+  return [...synced, ...current.filter(h => h.source === 'hand' && !reported.has(key(h)))];
 }
 
 // ---------------------------------------------------------------- valuing
@@ -267,11 +400,12 @@ export function valuePortfolio(holdings, market = {}, base = 'CAD', now = Date.n
   const usdcadBefore = isNum(usdcadChangePct) && usdcadChangePct > -100 ? usdcad / (1 + usdcadChangePct / 100) : usdcad;
   const rows = holdings.map(hd => {
     const isOption = hd.kind === 'option',
+      isCash = hd.kind === 'cash',
       mult = isOption ? MULT : 1;
     const quote = (hd.symbol && quotes[hd.symbol]) || null;
     const opt = (isOption && hd.option && options[hd.option.occ]) || null;
     const expired = isOption && !!hd.option && hd.option.expiry < today;
-    const livePrice = isOption ? opt?.mark : quote?.price;
+    const livePrice = isCash ? 1 : isOption ? opt?.mark : quote?.price; // a dollar of cash is worth a dollar
     const stated = hd.filePrice ?? (isNum(hd.fileValue) ? hd.fileValue / (hd.qty * mult) : null);
     const price = expired ? null : (livePrice ?? stated);
     const currency = (isOption ? hd.currency || quote?.currency : quote?.currency || hd.currency) || base;
@@ -282,13 +416,15 @@ export function valuePortfolio(holdings, market = {}, base = 'CAD', now = Date.n
     const pct = quote?.changePct;
     const move = !isNum(livePrice)
       ? null
-      : isOption
-        ? isNum(opt.chg)
-          ? opt.chg * mult * hd.qty
-          : null
-        : isNum(pct) && pct > -100
-          ? value - value / (1 + pct / 100)
-          : null;
+      : isCash
+        ? 0
+        : isOption
+          ? isNum(opt.chg)
+            ? opt.chg * mult * hd.qty
+            : null
+          : isNum(pct) && pct > -100
+            ? value - value / (1 + pct / 100)
+            : null;
     const fxBefore = fxRate(currency, base, usdcadBefore);
     const costBase =
       base === 'CAD' && isNum(hd.costCAD) ? hd.costCAD : isNum(hd.cost) && fx != null ? hd.cost * fx : null;
@@ -353,7 +489,7 @@ const sorted = (map, total) =>
   [...map]
     .map(([label, value]) => ({ label, value, share: total ? value / total : null }))
     .sort((a, b) => b.value - a.value);
-/** Is this row a fund, a single company, a coin or an option? Yahoo's word wins over the file's. */
+/** Is this row a fund, a single company, a coin, an option or cash? Yahoo's word wins over the file's. */
 const natureOf = (row, profile) =>
   row.kind === 'option'
     ? 'option'
@@ -364,7 +500,7 @@ const natureOf = (row, profile) =>
  * Each is a list of { label, value, share }, largest first, adding up to the whole portfolio.
  * A fund is spread over what it holds inside (its sectors, and its stocks, bonds and cash).
  * Yahoo gives no country split for funds, so they appear under one "Inside funds" line there.
- * An option counts at what it is worth today, under "Options".
+ * An option counts at what it is worth today, under "Options". Cash is its own line everywhere.
  */
 export function breakdown(rows, profiles = {}) {
   const sector = new Map(),
@@ -380,8 +516,9 @@ export function breakdown(rows, profiles = {}) {
       nature = natureOf(r, p);
     total += v;
     add(currency, r.currency, v);
-    if (nature === 'option' || nature === 'crypto') {
-      for (const map of [sector, asset, country]) add(map, nature === 'option' ? 'Options' : 'Crypto', v);
+    const apart = { option: 'Options', crypto: 'Crypto', cash: 'Cash' }[nature];
+    if (apart) {
+      for (const map of [sector, asset, country]) add(map, apart, v);
     } else if (nature === 'fund') {
       const parts = Object.entries(p?.assets || {}).filter(([, share]) => share > 0),
         whole = sum(parts.map(([, share]) => share));
@@ -459,8 +596,9 @@ export function concentration(rows) {
   const merged = new Map();
   for (const r of rows) {
     if (!(r.valueBase > 0)) continue;
-    const key = r.kind === 'option' ? r.id : r.symbol || r.id;
-    const item = merged.get(key) || { name: r.kind === 'option' ? r.name : r.symbol || r.name, value: 0 };
+    const cash = r.kind === 'cash' ? `Cash (${r.currency})` : null; // cash in several accounts is one holding
+    const key = cash || (r.kind === 'option' ? r.id : r.symbol || r.id);
+    const item = merged.get(key) || { name: cash || (r.kind === 'option' ? r.name : r.symbol || r.name), value: 0 };
     item.value += r.valueBase;
     merged.set(key, item);
   }

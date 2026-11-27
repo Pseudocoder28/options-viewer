@@ -39,6 +39,7 @@ export async function run(test, close) {
         fileValue: 18265.8,
         account: 'TFSA',
         option: null,
+        source: 'file',
       },
     );
     assert.deepEqual(
@@ -484,6 +485,213 @@ export async function run(test, close) {
     assert.equal(
       P.riskModel([pos('USFLAT', 100)], { dates, closes: { USFLAT: fx.closes.USFLAT } }, { ...opts, base: 'CAD' }),
       null,
+    );
+  });
+
+  test('brokerage link: positions and cash become holdings', () => {
+    const position = (instrument, units, price, cost_basis, currency) => ({
+      instrument,
+      units,
+      price,
+      cost_basis,
+      currency,
+    });
+    const data = {
+      accounts: [
+        {
+          name: ' TFSA ',
+          asOf: '2026-11-27T15:04:05Z',
+          positions: [
+            position(
+              {
+                kind: 'etf',
+                symbol: 'VFV.TO',
+                raw_symbol: 'VFV',
+                description: 'Vanguard S&P 500 Index ETF',
+                exchange: 'XTSE',
+              },
+              '60.5',
+              '183.2',
+              '150',
+              'CAD',
+            ),
+            position(
+              {
+                kind: 'stock',
+                symbol: 'AAPL',
+                raw_symbol: 'AAPL',
+                description: 'Apple Inc.',
+                currency: 'USD',
+                exchange: 'XNAS',
+              },
+              '15',
+              '355.58',
+              '266',
+              null,
+            ),
+            position({ kind: 'stock', symbol: 'BRK.B', raw_symbol: 'BRK.B', exchange: 'XNYS' }, 2, 480, null, 'USD'),
+            position(
+              { kind: 'crypto', symbol: 'BTC', raw_symbol: 'BTC', description: 'Bitcoin' },
+              '0.02',
+              '87500',
+              '75000',
+              'CAD',
+            ),
+            position(
+              { kind: 'option', symbol: 'GEMI  261204P00002000', description: 'GEMI put' },
+              '12',
+              '0.7',
+              '0.4',
+              'USD',
+            ),
+            position(
+              {
+                kind: 'option',
+                id: 'no code anywhere',
+                option_symbol: { option_type: 'CALL', strike_price: 300, expiration_date: '2026-12-18T00:00:00Z' },
+                underlying_symbol: { symbol: 'AAPL', raw_symbol: 'AAPL' },
+              },
+              '-1',
+              '60',
+              '50',
+              'USD',
+            ),
+            position({ kind: 'option', symbol: 'MYSTERY' }, '1', '2', '1', 'USD'),
+            position({ kind: 'bond', symbol: 'CAN 2.5 2030', description: 'Canada bond' }, '10', '98', null, 'CAD'),
+            position({ kind: 'cash', symbol: 'CAD' }, '500', '1', null, 'CAD'),
+            position({ kind: 'stock', symbol: '', description: 'Nameless' }, '1', '1', null, 'CAD'),
+            position({ kind: 'stock', symbol: 'ZERO', raw_symbol: 'ZERO', exchange: 'XNAS' }, '0', '1', null, 'USD'),
+          ],
+          cash: [
+            { currency: 'CAD', amount: 1250.5 },
+            { currency: 'USD', amount: 0 },
+            { currency: null, amount: 5 },
+          ],
+        },
+        {
+          name: '',
+          asOf: '2026-11-26T20:00:00Z',
+          positions: [
+            position(
+              { kind: 'etf', symbol: 'XEQT.TO', description: 'iShares Core Equity' },
+              '100',
+              '43.49',
+              '39',
+              'CAD',
+            ),
+          ],
+        },
+      ],
+    };
+    const { holdings, skipped, asOf } = P.fromBroker(data);
+    assert.equal(asOf, '2026-11-27', 'the newest account decides the date');
+    assert.deepEqual(
+      holdings.map(h => [h.symbol, h.raw, h.kind, h.qty, h.currency, h.account]),
+      [
+        ['VFV.TO', 'VFV', 'fund', 60.5, 'CAD', 'TFSA'],
+        ['AAPL', 'AAPL', 'stock', 15, 'USD', 'TFSA'],
+        ['BRK-B', 'BRK.B', 'stock', 2, 'USD', 'TFSA'],
+        ['BTC-CAD', 'BTC', 'crypto', 0.02, 'CAD', 'TFSA'],
+        ['GEMI', 'GEMI261204P00002000', 'option', 12, 'USD', 'TFSA'],
+        ['AAPL', 'AAPL261218C00300000', 'option', -1, 'USD', 'TFSA'],
+        [null, 'MYSTERY', 'option', 1, 'USD', 'TFSA'],
+        [null, 'CAN 2.5 2030', 'other', 10, 'CAD', 'TFSA'],
+        [null, 'CASH CAD', 'cash', 1250.5, 'CAD', 'TFSA'],
+        ['XEQT.TO', 'XEQT.TO', 'fund', 100, 'CAD', null],
+      ],
+    );
+    const by = raw => holdings.find(h => h.raw === raw);
+    close(by('VFV').cost, 150 * 60.5, 1e-9, 'a per-share cost becomes the cost of the position');
+    close(by('VFV').fileValue, 183.2 * 60.5, 1e-9, 'value at the price the brokerage gave');
+    assert.equal(by('BRK.B').cost, null, 'no cost given, none made up');
+    close(by('GEMI261204P00002000').cost, 480, 1e-9, 'an option position costs its price times 100 shares');
+    close(by('GEMI261204P00002000').fileValue, 840, 1e-9, 'and is worth its price times 100 shares');
+    assert.deepEqual(
+      by('AAPL261218C00300000').option,
+      P.makeOption('AAPL', '2026-12-18', 300, false),
+      'built from separate fields',
+    );
+    assert.deepEqual([by('AAPL261218C00300000').cost, by('MYSTERY').option], [-5000, null]);
+    assert.deepEqual([by('CASH CAD').name, by('CASH CAD').filePrice, by('CASH CAD').fileValue], ['Cash', 1, 1250.5]);
+    assert.deepEqual(
+      skipped,
+      [
+        { text: 'Nameless', reason: 'It has no symbol.' },
+        { text: 'ZERO', reason: 'It has no quantity.' },
+      ],
+      'the cash position is not listed twice, and what cannot be used is named',
+    );
+    assert.ok(holdings.every(h => h.source === 'broker' && h.costCAD === null));
+    assert.equal(new Set(holdings.map(h => h.id)).size, holdings.length);
+    for (const h of holdings) assert.deepEqual(P.cleanHolding(h), h, 'a holding survives being stored and read back');
+    for (const empty of [null, {}, { accounts: [{}] }]) assert.deepEqual(P.fromBroker(empty).holdings, []);
+
+    // After a sync: the brokerage's list, plus what was typed in by hand and is not on it.
+    const hand = (symbol, more = {}) => ({ ...stock('x', symbol, 1), source: 'hand', ...more });
+    const kept = P.afterSync(holdings, [
+      hand('GEMI', { kind: 'option', option: P.makeOption('GEMI', '2026-12-04', 2, true) }),
+      hand('GEMI', { kind: 'option', option: P.makeOption('GEMI', '2026-12-04', 1.5, true) }),
+      hand('AAPL'),
+      hand('ELSEWHERE'),
+      { ...stock('f', 'OLDFILE', 1), source: 'file' },
+      { ...stock('b', 'SOLD', 1), source: 'broker' },
+    ]);
+    assert.deepEqual(
+      kept.slice(holdings.length).map(h => h.option?.occ || h.symbol),
+      ['GEMI261204P00001500', 'ELSEWHERE'],
+      'hand-added holdings stay unless the brokerage now reports them',
+    );
+    assert.equal(P.cleanHolding({ ...hand('X'), source: 'made up' }).source, 'file');
+  });
+
+  test('cash: worth its face value, and a line of its own in every split', () => {
+    const cash = (id, qty, currency) => ({
+      id,
+      symbol: null,
+      raw: 'CASH ' + currency,
+      name: 'Cash',
+      kind: 'cash',
+      qty,
+      currency,
+    });
+    const v = P.valuePortfolio(
+      [
+        cash('a', 1000, 'CAD'),
+        cash('b', 500, 'CAD'),
+        cash('c', 100, 'USD'),
+        stock('s', 'AAPL', 10, { currency: 'USD' }),
+      ],
+      { quotes: { AAPL: { price: 200, changePct: 0, currency: 'USD' } }, usdcad: 1.4, usdcadChangePct: 1 },
+      'CAD',
+    );
+    close(v.total, 1500 + 140 + 2800, 1e-9, 'total');
+    assert.deepEqual(
+      v.rows.slice(0, 3).map(r => [r.price, r.live, r.valueBase]),
+      [
+        [1, true, 1000],
+        [1, true, 500],
+        [1, true, 140],
+      ],
+    );
+    assert.equal(v.rows[0].dayBase, 0, 'Canadian cash does not move for a Canadian holder');
+    close(v.rows[2].dayBase, 140 - 100 * (1.4 / 1.01), 1e-9, 'US cash moves with the exchange rate');
+    const b = P.breakdown(v.rows, { AAPL: { type: 'EQUITY', sector: 'Technology', country: 'United States' } });
+    for (const list of [b.sector, b.asset, b.country])
+      close(list.find(x => x.label === 'Cash').value, 1640, 1e-9, 'cash');
+    const c = P.concentration(v.rows);
+    assert.deepEqual(
+      c.list.map(x => [x.name, Math.round(x.value)]),
+      [
+        ['AAPL', 2800],
+        ['Cash (CAD)', 1500],
+        ['Cash (USD)', 140],
+      ],
+      'cash in two accounts is one holding per currency',
+    );
+    assert.deepEqual(
+      P.positions(v.rows),
+      [{ symbol: 'AAPL', name: 'AAPL', exposure: 2800, option: false }],
+      'cash carries no risk',
     );
   });
 

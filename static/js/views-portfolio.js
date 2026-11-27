@@ -140,6 +140,9 @@ const contractText = o =>
   `${F.date(o.expiry)}${+o.expiry.slice(0, 4) !== year ? ` '${o.expiry.slice(2, 4)}` : ''} ` +
   `${F.strike(o.strike)} ${o.put ? 'put' : 'call'}`;
 const optionName = o => `${o.underlying} ${contractText(o)}`;
+/** A moment as the wall clock of this computer shows it: "Nov 27, 10:15 PM". */
+const clock = ms =>
+  new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const tag = (text, tiptext, cls = '') => h('span', { class: 'tag ' + cls, tiptext }, text);
 
 /** A list of labelled bars: [{ label, value, share }]. */
@@ -345,6 +348,7 @@ function editHolding(ctx, existing) {
       filePrice: same ? existing.filePrice : null,
       account: draft.account,
       option,
+      source: 'hand',
     });
     if (!made) return fail('That does not make a holding. Check the ticker and the numbers.');
     const list = ctx.app.portfolio.holdings;
@@ -441,6 +445,240 @@ const banner = () =>
       )
     : null;
 
+// ---------------------------------------------------------------- the live link
+// Optional: holdings read from the brokerage through SnapTrade instead of from a file. The keys stay
+// with the local server, which never sends them back; this page only learns whether the link is set up.
+
+const SYNC_EVERY = 15 * 60_000; // an open Portfolio tab reads the brokerage again this often
+const SYNC_RETRY = 5 * 60_000; // and waits this long after a read that failed
+let link = { status: null, asked: false, syncing: false, problem: null, failedAt: 0 };
+
+/** Ask the server, once, whether the link is set up. */
+function checkLink(ctx) {
+  if (link.asked) return;
+  link.asked = true;
+  ctx.api('/api/snaptrade').then(
+    status => {
+      link.status = status;
+      if (ctx.app.view === 'portfolio') ctx.rerenderView();
+    },
+    () => {}, // no answer: the view simply offers no sync
+  );
+}
+
+/** Replace the holdings with what the brokerage reports now. Holdings typed in by hand are kept. */
+async function sync(ctx, quiet = false) {
+  if (link.syncing) return;
+  link.syncing = true;
+  link.problem = null;
+  if (!quiet) ctx.rerenderView();
+  try {
+    const data = await ctx.api('/api/snaptrade/holdings');
+    const { holdings, skipped, asOf } = P.fromBroker(data);
+    if (!holdings.length)
+      throw new Error(
+        'SnapTrade reports no holdings yet. Connect your brokerage first. Right after connecting, the first read can take a minute.',
+      );
+    const unread = holdings.filter(hd => hd.kind === 'option' && !hd.option);
+    const now = Date.now();
+    ctx.setPortfolio({
+      holdings: P.afterSync(holdings, ctx.app.portfolio.holdings),
+      asOf,
+      importedAt: now,
+      syncedAt: now,
+    });
+    if (!quiet)
+      notice = {
+        text: [
+          `Read ${F.plural(holdings.length, 'holding')} from your brokerage.`,
+          data.stale ? 'SnapTrade could not be reached just now, so these are the last ones it sent.' : '',
+          skipped.length
+            ? `${F.plural(skipped.length, 'position')} left out: ${skipped.map(s => `${s.text} (${s.reason})`).join('; ')}`
+            : '',
+          unread.length
+            ? `${F.plural(unread.length, 'option')} came without a strike and expiry this app could read (${unread.map(hd => hd.raw).join(', ')}), so ${unread.length === 1 ? 'it is' : 'they are'} valued at the brokerage's price and shown without Greeks.`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' '),
+        warn: skipped.length + unread.length > 0 || !!data.stale,
+      };
+  } catch (e) {
+    link.problem = e.message;
+    link.failedAt = Date.now();
+  } finally {
+    link.syncing = false;
+    if (ctx.app.view === 'portfolio') ctx.rerenderView();
+  }
+}
+
+const linkTrouble = ctx =>
+  link.problem
+    ? h(
+        'div',
+        { class: 'banner err', role: 'alert' },
+        `Your brokerage could not be read: ${link.problem}  `,
+        btn('TRY AGAIN', () => sync(ctx), '', 'Read the brokerage again'),
+        ' ',
+        btn('LINK', () => linkDialog(ctx), 'ghost', 'Open the link settings', 'btn:link-from-banner'),
+      )
+    : null;
+
+/** The dialog that sets up the live link, shows its state and removes it. */
+function linkDialog(ctx) {
+  const body = h('div', { class: 'form' });
+  const problem = h('p', { class: 'note warn', role: 'alert' });
+  const portal = h('div', { class: 'row' });
+  const draft = { clientId: '', consumerKey: '' };
+  const say = text => (problem.textContent = text || '');
+  const ask = async (path, payload, working) => {
+    say(working);
+    try {
+      const out = await ctx.api(path, payload);
+      say('');
+      return out;
+    } catch (e) {
+      say(e.message);
+      return null;
+    }
+  };
+  const field = (label, key, attrs) =>
+    h(
+      'label',
+      { class: 'field' },
+      h('span', null, label),
+      h('input', {
+        type: 'text',
+        autocomplete: 'off',
+        spellcheck: false,
+        oninput: e => (draft[key] = e.target.value),
+        ...attrs,
+      }),
+    );
+  const save = async () => {
+    const status = await ask('/api/snaptrade/keys', { ...draft }, 'Checking the keys with SnapTrade…');
+    if (!status) return;
+    draft.clientId = draft.consumerKey = '';
+    link.status = status;
+    draw();
+  };
+  const recheck = async () => {
+    const status = await ask('/api/snaptrade', undefined, 'Asking SnapTrade…');
+    if (!status) return;
+    link.status = status;
+    draw();
+  };
+  const connect = async () => {
+    const out = await ask('/api/snaptrade/portal', {}, 'Asking SnapTrade for a connection page…');
+    if (!out) return;
+    mount(
+      portal,
+      h(
+        'a',
+        { class: 'btn primary', href: out.url, target: '_blank', rel: 'noopener' },
+        'OPEN SNAPTRADE’S CONNECTION PAGE →',
+      ),
+      h(
+        'small',
+        { class: 'muted' },
+        'It opens in a new tab and works for five minutes. Choose your brokerage there and sign in. Then come back and press CHECK AGAIN.',
+      ),
+    );
+  };
+  const unlink = async () => {
+    const status = await ask('/api/snaptrade/forget', {}, 'Removing the keys…');
+    if (!status) return;
+    link.status = status;
+    link.problem = null;
+    draw();
+    ctx.rerenderView();
+  };
+  const describe = c =>
+    h(
+      'li',
+      null,
+      h('b', null, c.name),
+      c.broken
+        ? ' has stopped answering and needs connecting again. Press CONNECT A BROKERAGE and sign in once more.'
+        : c.canTrade
+          ? ' is connected with permission to trade. This app never trades, but to be safe remove the connection in SnapTrade’s dashboard and connect again from here: that asks for data access only.'
+          : ' is connected, for reading only.',
+      c.delayed && !c.broken ? ' SnapTrade refreshes its data once a day.' : '',
+    );
+  function draw() {
+    const s = link.status;
+    mount(portal);
+    if (!s?.linked)
+      return mount(
+        body,
+        note(
+          'This reads your holdings from your brokerage through SnapTrade, a separate company, so there is no file to download. The link is for reading only: this app never places orders.',
+        ),
+        note(
+          'To connect Wealthsimple you type your Wealthsimple login into SnapTrade’s page, not into this app. Wealthsimple’s security guarantee asks you not to share your login with any other organisation, so read its terms and decide whether that suits you.',
+        ),
+        h(
+          'ol',
+          { class: 'steps' },
+          h(
+            'li',
+            null,
+            'Create a free Personal account at ',
+            h('a', { href: 'https://snaptrade.com/personal', target: '_blank', rel: 'noopener' }, 'snaptrade.com'),
+            ' and turn on its two-factor sign-in.',
+          ),
+          h('li', null, 'In its dashboard, create a Personal API key.'),
+          h('li', null, 'Paste the two values of the key below. They are kept on this computer only.'),
+        ),
+        field('Client ID', 'clientId'),
+        field('Consumer key', 'consumerKey', { type: 'password' }),
+        problem,
+        h('div', { class: 'row' }, btn('SAVE THE KEYS', save, 'primary'), btn('CANCEL', closeModal, 'ghost')),
+      );
+    mount(
+      body,
+      s.error ? note(`SnapTrade could not be asked about your connections: ${s.error}`) : null,
+      s.connections.length
+        ? h('ul', { class: 'steps' }, s.connections.map(describe))
+        : s.error
+          ? null
+          : note('The keys are saved, but no brokerage is connected yet. Press CONNECT A BROKERAGE.'),
+      portal,
+      problem,
+      h(
+        'div',
+        { class: 'row' },
+        btn(
+          'CONNECT A BROKERAGE',
+          connect,
+          s.connections.length ? '' : 'primary',
+          'Opens SnapTrade’s page, asking for data access only',
+        ),
+        btn(
+          'SYNC NOW',
+          () => {
+            closeModal();
+            sync(ctx);
+          },
+          s.connections.length ? 'primary' : '',
+          'Read your holdings from the brokerage',
+        ),
+        btn('CHECK AGAIN', recheck, 'ghost', 'Ask SnapTrade for the state of the connection'),
+        btn('UNLINK', unlink, 'ghost', 'Remove the keys from this computer. Your holdings here stay as they are.'),
+        btn('CLOSE', closeModal, 'ghost'),
+      ),
+      h(
+        'p',
+        { class: 'note small' },
+        'The keys are kept in ~/.config/options-terminal/snaptrade.json on this computer, readable only by you. UNLINK deletes them. To remove the connection itself, use SnapTrade’s dashboard.',
+      ),
+    );
+  }
+  draw();
+  openModal('Live link to your brokerage', h('div', null, body));
+  if (link.status?.linked) recheck(); // what is shown first may be minutes old: ask SnapTrade for the state now
+}
+
 // ---------------------------------------------------------------- the empty view
 
 function welcome(ctx) {
@@ -485,6 +723,13 @@ function welcome(ctx) {
             ),
             ' ',
             btn('ADD A HOLDING BY HAND', () => editHolding(ctx), '', 'Type in a ticker and a quantity'),
+            ' ',
+            btn(
+              'LINK YOUR BROKERAGE',
+              () => linkDialog(ctx),
+              '',
+              'Read holdings straight from your brokerage through SnapTrade, with no file',
+            ),
           ),
         ),
         note(
@@ -505,7 +750,13 @@ function welcome(ctx) {
 export function render(root, ctx) {
   const { app } = ctx,
     all = app.portfolio.holdings;
-  if (!all.length) return append(root, banner(), welcome(ctx));
+  checkLink(ctx);
+  const linked = !!link.status?.linked,
+    synced = linked && app.portfolio.syncedAt;
+  // With the link set up, an open tab keeps itself current: no button to press, no file to fetch.
+  const due = Date.now() - (app.portfolio.syncedAt || 0) > SYNC_EVERY && Date.now() - link.failedAt > SYNC_RETRY;
+  if (linked && due && !link.syncing) sync(ctx, true);
+  if (!all.length) return append(root, banner(), linkTrouble(ctx), welcome(ctx));
 
   const p = ctx.prefs('portfolio', { base: 'CAD', account: 'all' }, { base: P.BASES });
   const accounts = [...new Set(all.map(hd => hd.account).filter(Boolean))];
@@ -523,7 +774,12 @@ export function render(root, ctx) {
   const prices = { quotes: m.quotes, options: m.options, usdcad: rate, usdcadChangePct: m.quotes[P.FX]?.changePct };
   const valued = P.valuePortfolio(holdings, prices, p.base);
   const rows = [...valued.rows].sort((a, b) => (b.valueBase ?? -Infinity) - (a.valueBase ?? -Infinity));
-  const nameOf = r => (r.holding.option ? contractText(r.holding.option) : m.profiles[r.symbol]?.name || r.name);
+  const nameOf = r =>
+    r.holding.option
+      ? contractText(r.holding.option)
+      : r.kind === 'cash'
+        ? r.currency
+        : m.profiles[r.symbol]?.name || r.name;
 
   // --- summary
   const stale = valued.rows.filter(r => r.valueBase != null && !r.live);
@@ -549,17 +805,41 @@ export function render(root, ctx) {
     stat('1 US dollar', rate ? `${F.num(rate, 4)} CAD` : '…', {
       tiptext: 'The exchange rate used to show US holdings in Canadian dollars, and the other way round.',
     }),
-    stat('File as of', app.portfolio.asOf ? F.dateLong(app.portfolio.asOf) : '—', {
-      sub: 'prices are live',
-      tiptext:
-        'Quantities and costs come from the file you imported. Prices are fetched now, about 15 minutes delayed. Import a newer file after you trade.',
-    }),
+    synced
+      ? stat('Brokerage read', clock(app.portfolio.syncedAt), {
+          sub: 'prices are live',
+          tiptext:
+            'Quantities and costs were read from your brokerage through SnapTrade at this time, and are read again every quarter of an hour while this tab is open. Prices are fetched now, about 15 minutes delayed.',
+        })
+      : stat('File as of', app.portfolio.asOf ? F.dateLong(app.portfolio.asOf) : '—', {
+          sub: 'prices are live',
+          tiptext:
+            'Quantities and costs come from the file you imported. Prices are fetched now, about 15 minutes delayed. Import a newer file after you trade.',
+        }),
   );
   const tools = [
     accounts.length > 1
       ? select([['all', 'All accounts'], ...accounts.map(a => [a, a])], p.account, v => set('account', v), 'Account')
       : null,
     seg(P.BASES, p.base, v => set('base', v), 'Show in'),
+    linked
+      ? btn(
+          link.syncing ? 'SYNCING…' : 'SYNC',
+          () => sync(ctx),
+          '',
+          'Read your holdings from the brokerage again',
+          'btn:sync',
+        )
+      : null,
+    btn(
+      linked ? 'LINK' : 'LIVE LINK',
+      () => linkDialog(ctx),
+      linked ? 'ghost' : '',
+      linked
+        ? 'The brokerage link: its state, reconnecting, removing it'
+        : 'Read holdings straight from your brokerage, with no file',
+      'btn:link',
+    ),
     fileButton(ctx, 'IMPORT'),
     btn('ADD', () => editHolding(ctx), '', 'Add a holding by hand'),
     btn('CLEAR', () => confirmClear(ctx), 'ghost', 'Remove all holdings from this browser'),
@@ -568,6 +848,7 @@ export function render(root, ctx) {
   append(
     root,
     banner(),
+    linkTrouble(ctx),
     problems.length
       ? h(
           'div',
@@ -596,7 +877,7 @@ export function render(root, ctx) {
                 ? `${F.plural(missing.length, 'holding')} could not be valued and ${missing.length === 1 ? 'is' : 'are'} left out of every figure: ${missing.map(r => `${r.holding.raw} (${r.why})`).join(' ')} `
                 : '',
               stale.length && priced
-                ? `${F.plural(stale.length, 'holding')} ${stale.length === 1 ? 'has' : 'have'} no live price and ${stale.length === 1 ? 'is' : 'are'} valued at the price in the file: ${stale.map(r => r.holding.raw).join(', ')}.`
+                ? `${F.plural(stale.length, 'holding')} ${stale.length === 1 ? 'has' : 'have'} no live price and ${stale.length === 1 ? 'is' : 'are'} valued at the price that came with ${stale.length === 1 ? 'it' : 'them'}: ${stale.map(r => r.holding.raw).join(', ')}.`
                 : '',
             )
           : null,
@@ -624,11 +905,18 @@ export function render(root, ctx) {
       label: 'Holding',
       cls: 'l',
       cell: r => [
-        h('b', null, r.holding.option ? r.holding.option.underlying : r.symbol || r.holding.raw),
+        h(
+          'b',
+          null,
+          r.holding.option ? r.holding.option.underlying : r.kind === 'cash' ? 'Cash' : r.symbol || r.holding.raw,
+        ),
         h('span', { class: 'nm' }, nameOf(r)),
         r.kind === 'option' ? tag('OPTION') : null,
         r.valueBase != null && !r.live && priced
-          ? tag('FILE PRICE', 'No live price was found, so this is valued at the price in the file you imported.')
+          ? tag(
+              r.holding.source === 'broker' ? 'BROKER PRICE' : 'FILE PRICE',
+              'No live price was found, so this is valued at the price that came with it: from your brokerage, or from the file you imported.',
+            )
           : null,
         r.shares != null
           ? h(
@@ -689,30 +977,40 @@ export function render(root, ctx) {
     },
     {
       label: '',
-      cell: r => [
-        h(
-          'button',
-          {
-            class: 'btn ghost',
-            key: `edit:${r.id}`,
-            'aria-label': `Edit ${r.holding.raw}`,
-            tiptext: 'Edit',
-            onclick: act(x => editHolding(ctx, x.holding), r),
-          },
-          '✎',
-        ),
-        h(
-          'button',
-          {
-            class: 'btn ghost',
-            key: `remove:${r.id}`,
-            'aria-label': `Remove ${r.holding.raw}`,
-            tiptext: 'Remove from the portfolio',
-            onclick: act(remove, r),
-          },
-          '✕',
-        ),
-      ],
+      cell: r =>
+        linked && r.holding.source === 'broker'
+          ? h(
+              'span',
+              {
+                class: 'muted',
+                tiptext: 'Read from your brokerage. It follows your account, so it is not edited here.',
+              },
+              'live',
+            )
+          : [
+              h(
+                'button',
+                {
+                  class: 'btn ghost',
+                  key: `edit:${r.id}`,
+                  'aria-label': `Edit ${r.holding.raw}`,
+                  tiptext: 'Edit',
+                  onclick: act(x => editHolding(ctx, x.holding), r),
+                },
+                '✎',
+              ),
+              h(
+                'button',
+                {
+                  class: 'btn ghost',
+                  key: `remove:${r.id}`,
+                  'aria-label': `Remove ${r.holding.raw}`,
+                  tiptext: 'Remove from the portfolio',
+                  onclick: act(remove, r),
+                },
+                '✕',
+              ),
+            ],
     },
   ].filter(Boolean);
   append(
