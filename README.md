@@ -18,7 +18,7 @@ No account. No API key. No build step.
 ![Platform](https://img.shields.io/badge/macOS%20app-included-000000?logo=apple&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[New to options?](#-new-to-options-start-here) · [Quick start](#-quick-start) · [Features](#-features) · [Screenshots](#-tour) · [Portfolio](#-your-portfolio) · [How it works](#-how-it-works) · [Tests](#-tests)
+[New here?](#-new-to-options-or-investing-start-here) · [Quick start](#-quick-start) · [Features](#-features) · [Screenshots](#-tour) · [Portfolio](#-your-portfolio) · [How it works](#-how-it-works) · [Tests](#-tests)
 
 <br/>
 
@@ -30,7 +30,7 @@ No account. No API key. No build step.
 
 ---
 
-## 💡 New to options? Start here
+## 💡 New to options or investing? Start here
 
 **What's an option?** It's like paying a small deposit to hold a price. Say you pay a seller $5k for the right to
 buy a $500k house at that price any time in the next 3 months. If prices jump to $600k, your deal is worth a lot. If
