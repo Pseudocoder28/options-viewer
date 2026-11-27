@@ -45,6 +45,19 @@ You can see what traders expect a stock to do, how nervous they are, and where t
 a trade to see your profit or loss before risking real money, learn the basics in built-in lessons, and check how
 well spread out your own investments are.
 
+**What's the Portfolio tab?** It's a health check for your investments. You might own 10 different things and feel
+safe, but if most of them are tech stocks, or funds that secretly hold the same big companies, one bad week for tech
+hits almost everything you own. That's putting all your eggs in one basket without realising it. Give the app your
+list of holdings (a file from your brokerage, or typed in by hand) and it shows:
+
+- **What you own and what it's worth** today, and how much you've gained or lost.
+- **Where your money really sits**: by industry, country and currency. It even looks inside funds, so you can see
+  that your "S&P 500 fund" is really a lot of Apple, Microsoft and Nvidia.
+- **How risky the mix is**: which holdings swing the most, which ones rise and fall together, and the biggest drop the
+  whole portfolio took in the past year.
+
+Your list stays on your computer. The app only looks up prices, and it never buys or sells anything.
+
 > **In one line:** a free, simple version of the expensive terminals professional traders use, and it explains what it shows in plain English.
 
 ---
